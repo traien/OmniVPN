@@ -1,15 +1,6 @@
-# Secrets & Keys
-keys/*
-!keys/*.example
-profiles/
-*.pem
-*.key
-*.crt
-
 # Environment and Credentials
 .env
-config/*.env
-!config/*.env.example
+*.env
 
 # Runtime & State Files
 *.log
