@@ -633,6 +633,7 @@ certutil -f -p "" -importpfx "%~dp0${username}.p12" NoExport
 
 echo [3/4] Configuring Windows IPsec registry parameters...
 REG ADD HKLM\\SYSTEM\\CurrentControlSet\\Services\\RasMan\\Parameters /v NegotiateDH2048_AES256 /t REG_DWORD /d 0x1 /f
+REG ADD HKLM\\SYSTEM\\CurrentControlSet\\Services\\PolicyAgent /v AssumeUDPEncapsulationContextOnSendRule /t REG_DWORD /d 0x2 /f
 
 echo [4/4] Creating Windows IKEv2 VPN profile...
 powershell -Command "Remove-VpnConnection -Name 'My IKEv2 VPN' -Force -ErrorAction SilentlyContinue; Add-VpnConnection -ServerAddress '${SERVER_IP}' -Name 'My IKEv2 VPN' -TunnelType IKEv2 -AuthenticationMethod MachineCertificate -EncryptionLevel Required -PassThru; Set-VpnConnectionIPsecConfiguration -ConnectionName 'My IKEv2 VPN' -AuthenticationTransformConstants GCMAES128 -CipherTransformConstants GCMAES128 -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -PfsGroup None -DHGroup Group14 -PassThru -Force"
