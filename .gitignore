@@ -1,9 +1,25 @@
 # Environment and Credentials
 .env
 *.env
+!.env.example
+!AGENTS.md
+
+# Generated VPN credentials and client bundles
+profiles/
+*.p12
+*.pfx
+*.mobileconfig
+*.sswan
+*.ovpnbackup
+*.pem
+*.key
 
 # Runtime & State Files
 *.log
 scratch/
 tmp/
 .DS_Store
+node_modules/
+webui/data/
+*.sqlite
+*.sqlite3

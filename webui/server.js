@@ -1,14 +1,26 @@
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const multer = require('multer');
-const { exec, execSync } = require('child_process');
+const { randomUUID } = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const archiver = require('archiver');
-const os = require('os');
+const { ZipArchive } = require('archiver');
 const db = require('./db');
 const adblock = require('./adblock');
-const protocols = require("./protocols");
+const protocols = require('./protocols');
+const { VPN_CONTAINER, restartContainer, runDockerExec, runFile } = require('./command');
+const { getSystemMetrics } = require('./system-metrics');
+const { createEncryptedArchive, decryptArchive, validateAndExtract } = require('./backup');
+const {
+  authMiddleware,
+  clearSessionCookie,
+  createRateLimiter,
+  isAuthenticated,
+  passwordMatches,
+  sameOriginMiddleware,
+  securityHeaders,
+  setSessionCookie
+} = require('./security');
 
 const { startDnsProxy, updateClientIpMap } = require('./dns-proxy');
 const { lookupIp } = require('./geoip');
@@ -16,43 +28,32 @@ const { getBandwidthData } = require('./bandwidth');
 
 const app = express();
 const PORT = process.env.WEBUI_PORT || 8080;
-const ADMIN_PASSWORD = process.env.WEBUI_PASSWORD || 'OmniVPNAdmin2026!';
-const VPN_CONTAINER = process.env.VPN_CONTAINER || 'ipsec-vpn-server';
-const SERVER_IP = process.env.VPN_PUBLIC_IP || '37.27.11.96';
-const VPN_PSK = process.env.VPN_IPSEC_PSK || 'OmniVPNSecurePSK2026!Key';
+const SERVER_IP = process.env.VPN_PUBLIC_IP || '';
+const VPN_PSK = process.env.VPN_IPSEC_PSK || '';
 
-app.use(express.json());
+if (!SERVER_IP || !VPN_PSK) {
+  throw new Error('VPN_PUBLIC_IP and VPN_IPSEC_PSK are required. Refusing to start with embedded defaults.');
+}
+
+if (process.env.WEBUI_TRUST_PROXY === 'true') app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use(securityHeaders);
+app.use(express.json({ limit: '32kb', strict: true }));
 app.use(cookieParser());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(sameOriginMiddleware);
+app.use(express.static(path.join(__dirname, 'public'), { etag: true, maxAge: '1h' }));
+app.use('/vendor/qrcode', express.static(path.join(__dirname, 'node_modules', 'qrcodejs'), { maxAge: '7d' }));
+
+app.get('/healthz', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.status(200).json({ status: 'ok' });
+});
 
 // Initialize DB, AdBlock, and WG/SS Protocols
 try {
   protocols.initProtocols();
 } catch (e) {
   console.error("Failed to init extra protocols:", e);
-}
-
-// Simple secure session token
-const SESSION_SECRET = 'ms_vps_' + Math.random().toString(36).substring(2);
-
-function authMiddleware(req, res, next) {
-  const token = req.cookies.vps_auth;
-  if (token === SESSION_SECRET) {
-    return next();
-  }
-  res.status(401).json({ error: 'Unauthorized' });
-}
-
-// Execute command inside VPN container
-function runDockerExec(cmd) {
-  return new Promise((resolve, reject) => {
-    exec(`docker exec ${VPN_CONTAINER} ${cmd}`, (err, stdout, stderr) => {
-      if (err) {
-        return resolve({ success: false, output: stderr || err.message, raw: '' });
-      }
-      resolve({ success: true, output: stdout.trim(), raw: stdout });
-    });
-  });
 }
 
 function formatBytes(bytes) {
@@ -63,15 +64,41 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
+function sendServerError(res, err, message = 'The operation could not be completed.') {
+  console.error('[API]', err);
+  if (!res.headersSent) res.status(500).json({ error: message });
+}
+
+function copyDirectoryContents(source, destination) {
+  if (!fs.existsSync(source)) return;
+  fs.mkdirSync(destination, { recursive: true, mode: 0o700 });
+  for (const entry of fs.readdirSync(source)) {
+    fs.cpSync(path.join(source, entry), path.join(destination, entry), {
+      recursive: true,
+      force: true,
+      preserveTimestamps: true
+    });
+  }
+}
+
+function csvCell(value) {
+  let text = String(value ?? '');
+  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
 // -----------------------------------------------------------------------------
 // Live Connected Devices Discovery & GeoIP Telemetry
 // -----------------------------------------------------------------------------
-async function getConnectedDevices() {
+async function discoverConnectedDevices() {
   const devices = [];
   try {
-    const trafficRes = await runDockerExec('ipsec whack --trafficstatus');
-    const statusRes = await runDockerExec('ipsec status');
-    const pppRes = await runDockerExec("bash -c 'ip -o -4 addr show 2>/dev/null || true'");
+    const [trafficRes, statusRes, pppRes, wireguardRes] = await Promise.all([
+      runDockerExec(['ipsec', 'whack', '--trafficstatus']),
+      runDockerExec(['ipsec', 'status']),
+      runDockerExec(['sh', '-c', 'ip -o -4 addr show 2>/dev/null || true']),
+      runFile('docker', ['exec', 'wireguard', 'wg', 'show', 'wg0', 'dump'])
+    ]);
 
     // 1. Parse trafficstatus (IKEv2 & IPsec Child SAs)
     if (trafficRes.success && trafficRes.output) {
@@ -120,16 +147,14 @@ async function getConnectedDevices() {
           else if (line.includes('l2tp')) proto = 'L2TP/IPsec';
           else if (line.includes('xauth')) proto = 'IPsec/XAuth';
 
-          const geo = await lookupIp(remoteIp);
-
           devices.push({
-            id: 'sa_' + (addTime || Math.random().toString(36).substring(7)),
+            id: 'sa_' + (addTime || randomUUID()),
             stateId,
             username,
             remoteIp,
             virtualIp,
             protocol: proto,
-            geo,
+            geo: null,
             inBytesFormatted: formatBytes(inBytes),
             outBytesFormatted: formatBytes(outBytes),
             duration,
@@ -154,14 +179,13 @@ async function getConnectedDevices() {
             else if (connName.includes('xauth')) proto = 'IPsec/XAuth';
 
             if (!devices.some(d => d.remoteIp === remoteIp)) {
-              const geo = await lookupIp(remoteIp);
               devices.push({
-                id: 'sa_' + Math.random().toString(36).substring(7),
+                id: 'sa_' + randomUUID(),
                 username: connName.includes('l2tp') ? 'L2TP Client' : (connName.includes('ikev2') ? 'IKEv2 Client' : 'Connected Peer'),
                 remoteIp,
                 virtualIp: 'Tunnel Active',
                 protocol: proto,
-                geo,
+                geo: null,
                 inBytesFormatted: '0 B',
                 outBytesFormatted: '0 B',
                 duration: 'Active',
@@ -200,10 +224,59 @@ async function getConnectedDevices() {
       }
     }
 
+    // 4. WireGuard is connectionless; treat a handshake in the last three minutes as active.
+    if (wireguardRes.success && wireguardRes.output) {
+      const protocolUsers = protocols.getAllProtocols();
+      const userByPublicKey = new Map(Object.entries(protocolUsers).map(([name, user]) => [user.wgPub, name]));
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      for (const line of wireguardRes.output.split('\n').slice(1)) {
+        const [publicKey, , endpoint, allowedIps, handshakeText, receivedText, sentText] = line.split('\t');
+        const handshake = Number.parseInt(handshakeText, 10) || 0;
+        if (!publicKey || handshake === 0 || nowSeconds - handshake > 180) continue;
+        const username = userByPublicKey.get(publicKey) || 'WireGuard peer';
+        const virtualIp = (allowedIps || '').split(',')[0].replace(/\/\d+$/, '') || 'Tunnel active';
+        const endpointValue = endpoint || '';
+        const ipv6Endpoint = endpointValue.match(/^\[([^\]]+)\]:\d+$/);
+        const endpointIp = (ipv6Endpoint ? ipv6Endpoint[1] : endpointValue.replace(/:\d+$/, '')) || 'Direct tunnel';
+        updateClientIpMap(virtualIp, username);
+        devices.push({
+          id: `wg_${publicKey.slice(0, 12)}`,
+          stateId: null,
+          username,
+          remoteIp: endpointIp,
+          virtualIp,
+          protocol: 'WireGuard',
+          geo: null,
+          inBytesFormatted: formatBytes(Number.parseInt(receivedText, 10) || 0),
+          outBytesFormatted: formatBytes(Number.parseInt(sentText, 10) || 0),
+          duration: `Handshake ${Math.max(0, nowSeconds - handshake)}s ago`,
+          connectedAt: new Date(handshake * 1000).toISOString()
+        });
+      }
+    }
+
   } catch (e) {
     console.error('Error discovering connected devices:', e);
   }
+  await Promise.all(devices.map(async (device) => {
+    if (!device.geo) device.geo = await lookupIp(device.remoteIp);
+  }));
   return devices;
+}
+
+let devicesCache = { expiresAt: 0, value: [] };
+let devicesRequest = null;
+
+async function getConnectedDevices() {
+  if (devicesCache.expiresAt > Date.now()) return devicesCache.value;
+  if (devicesRequest) return devicesRequest;
+  devicesRequest = discoverConnectedDevices()
+    .then((value) => {
+      devicesCache = { value, expiresAt: Date.now() + 2_500 };
+      return value;
+    })
+    .finally(() => { devicesRequest = null; });
+  return devicesRequest;
 }
 
 // -----------------------------------------------------------------------------
@@ -216,41 +289,42 @@ app.post('/api/connections/kick', authMiddleware, async (req, res) => {
   }
 
   try {
-    const result = await runDockerExec(`ipsec whack --deletestate ${stateId}`);
+    const result = await runDockerExec(['ipsec', 'whack', '--deletestate', stateId]);
     if (result.success) {
       res.json({ success: true });
     } else {
       res.status(500).json({ error: 'Failed to disconnect client. They may have already disconnected.' });
     }
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    sendServerError(res, e, 'The tunnel could not be disconnected.');
   }
 });
 
 // -----------------------------------------------------------------------------
 // Authentication Endpoints
 // -----------------------------------------------------------------------------
-app.post('/api/auth/login', (req, res) => {
+const loginLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 8,
+  message: 'Too many sign-in attempts. Wait 15 minutes and try again.'
+});
+
+app.post('/api/auth/login', loginLimiter, (req, res) => {
   const { password } = req.body;
-  if (password === ADMIN_PASSWORD) {
-    res.cookie('vps_auth', SESSION_SECRET, {
-      httpOnly: true,
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      sameSite: 'strict'
-    });
+  if (typeof password === 'string' && passwordMatches(password)) {
+    setSessionCookie(req, res);
     return res.json({ success: true });
   }
   res.status(401).json({ error: 'Invalid admin credentials' });
 });
 
 app.post('/api/auth/logout', (req, res) => {
-  res.clearCookie('vps_auth');
+  clearSessionCookie(req, res);
   res.json({ success: true });
 });
 
 app.get('/api/auth/check', (req, res) => {
-  const token = req.cookies.vps_auth;
-  res.json({ authenticated: token === SESSION_SECRET });
+  res.json({ authenticated: isAuthenticated(req) });
 });
 
 // -----------------------------------------------------------------------------
@@ -258,32 +332,42 @@ app.get('/api/auth/check', (req, res) => {
 // -----------------------------------------------------------------------------
 app.get('/api/status', authMiddleware, async (req, res) => {
   try {
-    const ipsecStatus = await runDockerExec('ipsec status');
+    const ipsecStatus = await runDockerExec(['ipsec', 'status']);
     const connectedDevices = await getConnectedDevices();
     const bandwidth = getBandwidthData();
 
-    // System uptime & load
-    const uptimeSeconds = os.uptime();
-    const loadAvg = os.loadavg();
-    const totalMem = os.totalmem();
-    const freeMem = os.freemem();
-    const usedMemPercent = Math.round(((totalMem - freeMem) / totalMem) * 100);
+    const system = getSystemMetrics();
 
     res.json({
       serverIp: SERVER_IP,
-      psk: VPN_PSK,
+      pskConfigured: Boolean(VPN_PSK),
       vpnStatus: ipsecStatus.success ? 'online' : 'degraded',
       activeConnections: connectedDevices.length,
       devices: connectedDevices,
       bandwidth,
-      uptimeSeconds,
-      loadAverage: loadAvg[0].toFixed(2),
-      memoryUsagePercent: usedMemPercent,
+      uptimeSeconds: system.uptimeSeconds,
+      loadAverage: system.loadAverage,
+      memoryUsagePercent: system.memoryUsagePercent,
+      metricScope: system.scope,
       ipsecDetails: ipsecStatus.output
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'Server status is temporarily unavailable.');
   }
+});
+
+app.get('/api/secrets/ipsec-psk', authMiddleware, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ psk: VPN_PSK });
+});
+
+app.get('/api/secrets/ikev2-config-password', authMiddleware, async (req, res) => {
+  const result = await runDockerExec(['sh', '-c', '. /etc/ipsec.d/ikev2.conf 2>/dev/null || true; printf %s "$IKEV2_CONFIG_PASSWORD"']);
+  if (!result.success || !result.output) {
+    return res.status(404).json({ error: 'IKEv2 profile protection is not enabled for this deployment.' });
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ password: result.output });
 });
 
 app.get('/api/bandwidth', authMiddleware, (req, res) => {
@@ -295,7 +379,7 @@ app.get('/api/devices', authMiddleware, async (req, res) => {
     const devices = await getConnectedDevices();
     res.json({ devices });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'Connected clients are temporarily unavailable.');
   }
 });
 
@@ -305,10 +389,17 @@ app.get('/api/devices', authMiddleware, async (req, res) => {
 app.get('/api/logs', authMiddleware, async (req, res) => {
   try {
     const { limit = 50, offset = 0, search = '', client = '', domain = '', status = '' } = req.query;
-    const data = await db.getLogs({ limit, offset, search, client, domain, status });
+    const data = await db.getLogs({
+      limit: Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 50)),
+      offset: Math.min(1_000_000, Math.max(0, Number.parseInt(offset, 10) || 0)),
+      search: String(search).slice(0, 200),
+      client: String(client).slice(0, 128),
+      domain: String(domain).slice(0, 253),
+      status: ['BLOCKED', 'RESOLVED'].includes(status) ? status : ''
+    });
     res.json(data);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'Activity logs are temporarily unavailable.');
   }
 });
 
@@ -318,7 +409,7 @@ app.get('/api/logs/stats', authMiddleware, async (req, res) => {
     stats.adblockRules = adblock.getBlocklistSize();
     res.json(stats);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'Activity statistics are temporarily unavailable.');
   }
 });
 
@@ -329,12 +420,12 @@ app.get('/api/logs/export/csv', authMiddleware, async (req, res) => {
     
     let csv = 'Timestamp,Client Name,Client IP,Domain Visited,Query Type,Status\r\n';
     for (const row of rows) {
-      const ts = `"${row.created_at}"`;
-      const name = `"${(row.client_name || 'VPN Client').replace(/"/g, '""')}"`;
-      const ip = `"${row.client_ip}"`;
-      const domain = `"${(row.domain || '').replace(/"/g, '""')}"`;
-      const qtype = `"${row.qtype || 'A'}"`;
-      const st = `"${row.status || 'RESOLVED'}"`;
+      const ts = csvCell(row.created_at);
+      const name = csvCell(row.client_name || 'VPN Client');
+      const ip = csvCell(row.client_ip);
+      const domain = csvCell(row.domain);
+      const qtype = csvCell(row.qtype || 'A');
+      const st = csvCell(row.status || 'RESOLVED');
       csv += `${ts},${name},${ip},${domain},${qtype},${st}\r\n`;
     }
 
@@ -343,7 +434,7 @@ app.get('/api/logs/export/csv', authMiddleware, async (req, res) => {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.send(csv);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'The activity export could not be created.');
   }
 });
 
@@ -352,7 +443,7 @@ app.delete('/api/logs/clear', authMiddleware, async (req, res) => {
     const count = await db.clearLogs();
     res.json({ success: true, count });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'Activity logs could not be cleared.');
   }
 });
 
@@ -361,15 +452,15 @@ app.delete('/api/logs/clear', authMiddleware, async (req, res) => {
 // -----------------------------------------------------------------------------
 app.post('/api/adblock/toggle', authMiddleware, async (req, res) => {
   const { username, enabled } = req.body;
-  if (!username) {
-    return res.status(400).json({ error: 'Username is required' });
+  if (typeof username !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(username) || typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'Client name or ad-block setting is invalid.' });
   }
 
   try {
     const result = await db.setClientAdblock(username, enabled);
     res.json({ success: true, ...result });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'The ad-block setting could not be saved.');
   }
 });
 
@@ -378,9 +469,11 @@ app.post('/api/adblock/toggle', authMiddleware, async (req, res) => {
 // -----------------------------------------------------------------------------
 app.get('/api/users', authMiddleware, async (req, res) => {
   try {
-    const listRes = await runDockerExec('ikev2.sh --listclients');
-    const pppRes = await runDockerExec("bash -c 'cat /etc/ppp/chap-secrets 2>/dev/null || true'");
-    const connectedDevices = await getConnectedDevices();
+    const [listRes, pppRes, connectedDevices] = await Promise.all([
+      runDockerExec(['ikev2.sh', '--listclients']),
+      runDockerExec(['sh', '-c', 'cat /etc/ppp/chap-secrets 2>/dev/null || true']),
+      getConnectedDevices()
+    ]);
 
     const clientMap = new Map();
 
@@ -453,11 +546,8 @@ app.get('/api/users', authMiddleware, async (req, res) => {
       if (allProtos[name]) {
         u.hasWg = true;
         u.hasSs = true;
-        u.wgPriv = allProtos[name].wgPriv;
         u.wgIp = allProtos[name].wgIp;
-        u.xrayPass = allProtos[name].xrayPass;
         u.serverWgPub = serverWgPub;
-        u.wgPsk = allProtos[name].wgPsk;
       }
     }
 
@@ -473,10 +563,7 @@ app.get('/api/users', authMiddleware, async (req, res) => {
           hasL2tp: false,
           hasWg: true,
           hasSs: true,
-          wgPriv: p.wgPriv,
           wgIp: p.wgIp,
-          wgPsk: p.wgPsk,
-          xrayPass: p.xrayPass,
           serverWgPub,
           createdAt: new Date().toISOString()
         });
@@ -485,36 +572,66 @@ app.get('/api/users', authMiddleware, async (req, res) => {
 
     res.json({ users: Array.from(clientMap.values()), serverIp: process.env.VPN_PUBLIC_IP || '127.0.0.1' });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'The client list is temporarily unavailable.');
   }
+});
+
+app.get('/api/users/:username/configs', authMiddleware, (req, res) => {
+  const { username } = req.params;
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
+    return res.status(400).json({ error: 'Invalid client name.' });
+  }
+  const user = protocols.getAllProtocols()[username];
+  if (!user) return res.status(404).json({ error: 'Client protocol configuration was not found.' });
+
+  const serverWgPub = protocols.getServerWgPub();
+  const wgConfig = user.wgPriv && user.wgIp && serverWgPub
+    ? `[Interface]\nPrivateKey = ${user.wgPriv}\nAddress = 10.8.0.${user.wgIp}/32\nDNS = 172.20.0.3\n\n[Peer]\nPublicKey = ${serverWgPub}\nPresharedKey = ${user.wgPsk}\nEndpoint = ${SERVER_IP}:51820\nAllowedIPs = 0.0.0.0/0\nPersistentKeepalive = 25`
+    : '';
+  const ssToken = user.xrayPass ? Buffer.from(`aes-128-gcm:${user.xrayPass}`).toString('base64url') : '';
+  const ssUri = ssToken ? `ss://${ssToken}@${SERVER_IP}:8388#OmniVPN-${encodeURIComponent(username)}` : '';
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ wgConfig, ssUri });
 });
 
 app.post('/api/users', authMiddleware, async (req, res) => {
   const { username, password } = req.body;
-  if (!username || !/^[a-zA-Z0-9_-]+$/.test(username)) {
-    return res.status(400).json({ error: 'Invalid username. Use alphanumeric characters, dashes, or underscores.' });
+  if (typeof username !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
+    return res.status(400).json({ error: 'Client name must contain 1–64 letters, numbers, dashes, or underscores.' });
+  }
+  if (password && (typeof password !== 'string' || password.length < 12 || password.length > 128 || /[\r\n\0]/.test(password))) {
+    return res.status(400).json({ error: 'Password must contain 12–128 characters and cannot contain line breaks.' });
   }
 
-  const vpnPass = password || Math.random().toString(36).slice(-10) + 'A1!';
+  const vpnPass = password || require('crypto').randomBytes(18).toString('base64url');
+  const writePppScript = [
+    'set -eu',
+    'tmp="$(mktemp)"',
+    'awk -v user="$1" \'$1 != "\\\"" user "\\\"" { print }\' /etc/ppp/chap-secrets 2>/dev/null > "$tmp" || true',
+    'printf \'"%s" * "%s" *\\n\' "$1" "$2" >> "$tmp"',
+    'cat "$tmp" > /etc/ppp/chap-secrets',
+    'chmod 600 /etc/ppp/chap-secrets',
+    'rm -f "$tmp"'
+  ].join('\n');
 
   try {
-    // 1. Generate IKEv2 client certificate
-    const ikeRes = await runDockerExec(`ikev2.sh --addclient "${username}"`);
-    
-    // 2. Add L2TP / PPP credentials
-    await runDockerExec(`bash -c "
-      if grep -q '^\\\\\\"${username}\\\\\\"' /etc/ppp/chap-secrets 2>/dev/null; then
-        sed -i '/^\\\\\\"${username}\\\\\\"/d' /etc/ppp/chap-secrets
-      fi
-      echo '\\\\\\"${username}\\\\\\" * \\\\\\"${vpnPass}\\\\\\" *' >> /etc/ppp/chap-secrets
-    "`);
+    const ikeRes = await runDockerExec(['ikev2.sh', '--addclient', username], { timeout: 60_000 });
+    if (!ikeRes.success) throw new Error(`IKEv2 certificate generation failed: ${ikeRes.error}`);
+
+    const pppRes = await runDockerExec(['sh', '-c', writePppScript, 'omnivpn-ppp', username, vpnPass]);
+    if (!pppRes.success) {
+      await runDockerExec(['sh', '-c', 'printf "y\\n" | ikev2.sh --revokeclient "$1" || true', 'omnivpn-revoke', username]);
+      throw new Error(`L2TP credential creation failed: ${pppRes.error}`);
+    }
 
     // 3. Add WireGuard and Shadowsocks
     let extraProtos = null;
     try {
       extraProtos = protocols.addUserProtocols(username);
     } catch (e) {
-      console.error("Failed to add WG/SS protocols", e);
+      await runDockerExec(['sh', '-c', 'tmp="$(mktemp)"; awk -v user="$1" \'$1 != "\\\"" user "\\\"" { print }\' /etc/ppp/chap-secrets > "$tmp"; cat "$tmp" > /etc/ppp/chap-secrets; rm -f "$tmp"', 'omnivpn-rollback', username]);
+      await runDockerExec(['sh', '-c', 'printf "y\\n" | ikev2.sh --revokeclient "$1" || true', 'omnivpn-revoke', username]);
+      throw e;
     }
 
     res.json({
@@ -522,18 +639,19 @@ app.post('/api/users', authMiddleware, async (req, res) => {
       user: {
         name: username,
         password: vpnPass,
-        ikev2Output: ikeRes.output,
-        extra: extraProtos
+        protectedConfig: /Password for client config files:/i.test(ikeRes.output),
+        extra: Boolean(extraProtos)
       }
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('[Users] Create failed:', err.message);
+    res.status(500).json({ error: 'Client creation did not complete. No partial client was retained.' });
   }
 });
 
 app.delete('/api/users/:username', authMiddleware, async (req, res) => {
   const username = req.params.username;
-  if (!username || !/^[a-zA-Z0-9_-]+$/.test(username)) {
+  if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
     return res.status(400).json({ error: 'Invalid username.' });
   }
 
@@ -543,20 +661,21 @@ app.delete('/api/users/:username', authMiddleware, async (req, res) => {
       const devices = await getConnectedDevices();
       for (const dev of devices) {
         if (dev.username === username && dev.stateId) {
-          await runDockerExec(`ipsec whack --deletestate ${dev.stateId}`);
+          await runDockerExec(['ipsec', 'whack', '--deletestate', dev.stateId]);
         }
       }
     } catch(e) {}
 
     // 1. Revoke IKEv2 client (non-interactive)
-    await runDockerExec(`bash -c 'echo y | ikev2.sh --revokeclient "${username}" || true'`);
+    await runDockerExec(['sh', '-c', 'printf "y\\n" | ikev2.sh --revokeclient "$1" || true', 'omnivpn-revoke', username]);
 
     // 2. Remove L2TP credentials
-    await runDockerExec(`bash -c "
-      if grep -q '^\\\\\\"${username}\\\\\\"' /etc/ppp/chap-secrets 2>/dev/null; then
-        sed -i '/^\\\\\\"${username}\\\\\\"/d' /etc/ppp/chap-secrets
-      fi
-    "`);
+    const removePpp = await runDockerExec([
+      'sh', '-c',
+      'tmp="$(mktemp)"; awk -v user="$1" \'$1 != "\\\"" user "\\\"" { print }\' /etc/ppp/chap-secrets 2>/dev/null > "$tmp" || true; cat "$tmp" > /etc/ppp/chap-secrets; chmod 600 /etc/ppp/chap-secrets; rm -f "$tmp"',
+      'omnivpn-delete', username
+    ]);
+    if (!removePpp.success) throw new Error(removePpp.error);
 
     // 3. Remove WG/SS credentials
     try {
@@ -565,10 +684,10 @@ app.delete('/api/users/:username', authMiddleware, async (req, res) => {
       console.error("Failed to remove WG/SS protocols", e);
     }
 
-    db.removeClientAdblock(username);
+    await db.removeClientAdblock(username);
     res.json({ success: true, username });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'The client could not be removed completely.');
   }
 });
 
@@ -577,16 +696,18 @@ app.delete('/api/users/:username', authMiddleware, async (req, res) => {
 // -----------------------------------------------------------------------------
 app.get('/api/users/:username/download/:type', authMiddleware, async (req, res) => {
   const { username, type } = req.params;
-  if (!username || !/^[a-zA-Z0-9_-]+$/.test(username)) {
+  if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
     return res.status(400).json({ error: 'Invalid username.' });
   }
+  if (!['p12', 'mobileconfig', 'sswan', 'windows-zip'].includes(type)) {
+    return res.status(400).json({ error: 'Invalid download type.' });
+  }
 
-  const tmpExport = `/tmp/export_${username}_${Date.now()}`;
+  const tmpExport = fs.mkdtempSync('/tmp/omnivpn-export-');
   try {
-    execSync(`mkdir -p ${tmpExport}`);
-    execSync(`docker cp ${VPN_CONTAINER}:/etc/ipsec.d/${username}.p12 ${tmpExport}/ 2>/dev/null || true`);
-    execSync(`docker cp ${VPN_CONTAINER}:/etc/ipsec.d/${username}.mobileconfig ${tmpExport}/ 2>/dev/null || true`);
-    execSync(`docker cp ${VPN_CONTAINER}:/etc/ipsec.d/${username}.sswan ${tmpExport}/ 2>/dev/null || true`);
+    await Promise.all(['p12', 'mobileconfig', 'sswan'].map((extension) =>
+      runFile('docker', ['cp', '-L', `${VPN_CONTAINER}:/etc/ipsec.d/${username}.${extension}`, tmpExport], { timeout: 30_000 })
+    ));
 
     if (type === 'p12') {
       const filePath = `${tmpExport}/${username}.p12`;
@@ -629,7 +750,7 @@ echo [1/4] Cleaning up old VPN certificates for ${username}...
 powershell -Command "Get-ChildItem -Path Cert:\\LocalMachine\\My | Where-Object { $_.Subject -match 'CN=${username}' } | Remove-Item -Force -ErrorAction SilentlyContinue"
 
 echo [2/4] Importing ${username}.p12 certificate into Machine Store...
-certutil -f -p "" -importpfx "%~dp0${username}.p12" NoExport
+      certutil -f -importpfx "%~dp0${username}.p12" NoExport
 
 echo [3/4] Configuring Windows IPsec registry parameters...
 REG ADD HKLM\\SYSTEM\\CurrentControlSet\\Services\\RasMan\\Parameters /v NegotiateDH2048_AES256 /t REG_DWORD /d 0x1 /f
@@ -660,7 +781,7 @@ WINDOWS 10 / 11 SETUP (Easiest):
 MANUAL POWERSHELL SETUP:
 1. Open PowerShell as Administrator.
 2. Run:
-   certutil -f -p "" -importpfx "${username}.p12" NoExport
+   certutil -f -importpfx "${username}.p12" NoExport
    REG ADD HKLM\\SYSTEM\\CurrentControlSet\\Services\\RasMan\\Parameters /v NegotiateDH2048_AES256 /t REG_DWORD /d 0x1 /f
    Add-VpnConnection -ServerAddress '${SERVER_IP}' -Name 'My IKEv2 VPN' -TunnelType IKEv2 -AuthenticationMethod MachineCertificate -EncryptionLevel Required -PassThru
    Set-VpnConnectionIPsecConfiguration -ConnectionName 'My IKEv2 VPN' -AuthenticationTransformConstants GCMAES128 -CipherTransformConstants GCMAES128 -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -PfsGroup None -DHGroup Group14 -PassThru -Force
@@ -670,9 +791,12 @@ MANUAL POWERSHELL SETUP:
       res.setHeader('Content-Type', 'application/zip');
       res.setHeader('Content-Disposition', `attachment; filename="${username}_windows_ikev2.zip"`);
 
-      const archive = archiver('zip', { zlib: { level: 9 } });
+      const archive = new ZipArchive({ zlib: { level: 9 } });
       archive.on('end', () => fs.rmSync(tmpExport, { recursive: true, force: true }));
-      archive.on('error', (err) => res.status(500).send({ error: err.message }));
+      archive.on('error', (err) => {
+        fs.rmSync(tmpExport, { recursive: true, force: true });
+        sendServerError(res, err, 'The client package could not be created.');
+      });
 
       archive.pipe(res);
       archive.file(`${tmpExport}/install_windows_ikev2.bat`, { name: 'install_windows_ikev2.bat' });
@@ -682,10 +806,11 @@ MANUAL POWERSHELL SETUP:
       return;
     }
 
-    res.status(400).json({ error: 'Invalid download type.' });
+    fs.rmSync(tmpExport, { recursive: true, force: true });
+    return res.status(400).json({ error: 'Invalid download type.' });
   } catch (err) {
     if (fs.existsSync(tmpExport)) fs.rmSync(tmpExport, { recursive: true, force: true });
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'The requested client package is unavailable.');
   }
 });
 
@@ -694,32 +819,35 @@ MANUAL POWERSHELL SETUP:
 // -----------------------------------------------------------------------------
 const upload = multer({
   dest: '/tmp/vpn-uploads/',
-  limits: { fileSize: 500 * 1024 * 1024 } // 500MB max
+  limits: { files: 1, fields: 0, fileSize: 100 * 1024 * 1024, fieldNestingDepth: 1 }
 });
 
 app.get('/api/backup/export', authMiddleware, async (req, res) => {
-  const tmpDir = `/tmp/vpn_backup_${Date.now()}`;
+  const tmpDir = fs.mkdtempSync('/tmp/omnivpn-backup-');
+  const encryptedPath = `${tmpDir}.ovpnbackup`;
   try {
-    execSync(`mkdir -p ${tmpDir}/ipsec.d ${tmpDir}/ppp ${tmpDir}/data ${tmpDir}/wireguard ${tmpDir}/xray`);
+    for (const directory of ['ipsec.d', 'ppp', 'data', 'wireguard', 'xray']) {
+      fs.mkdirSync(path.join(tmpDir, directory), { recursive: true, mode: 0o700 });
+    }
 
     // 1. Copy IPsec certificates & keys from VPN container
-    execSync(`docker cp ${VPN_CONTAINER}:/etc/ipsec.d/. ${tmpDir}/ipsec.d/ 2>/dev/null || true`);
+    await runFile('docker', ['cp', '-L', `${VPN_CONTAINER}:/etc/ipsec.d/.`, path.join(tmpDir, 'ipsec.d')], { timeout: 60_000 });
 
     // 2. Copy L2TP/PPP credentials
-    execSync(`docker cp ${VPN_CONTAINER}:/etc/ppp/. ${tmpDir}/ppp/ 2>/dev/null || true`);
+    await runFile('docker', ['cp', '-L', `${VPN_CONTAINER}:/etc/ppp/.`, path.join(tmpDir, 'ppp')], { timeout: 60_000 });
 
     // 3. Copy WG and Xray
-    execSync(`cp -r /etc/wireguard/* ${tmpDir}/wireguard/ 2>/dev/null || true`);
-    execSync(`cp -r /etc/xray/* ${tmpDir}/xray/ 2>/dev/null || true`);
+    copyDirectoryContents('/etc/wireguard', path.join(tmpDir, 'wireguard'));
+    copyDirectoryContents('/etc/xray', path.join(tmpDir, 'xray'));
 
     // 4. Copy SQLite activity DB & JSON settings
     const dbSource = path.join(__dirname, 'data', 'vpn_activity.db');
     if (fs.existsSync(dbSource)) {
-      execSync(`cp "${dbSource}" "${tmpDir}/data/vpn_activity.db"`);
+      fs.copyFileSync(dbSource, path.join(tmpDir, 'data', 'vpn_activity.db'));
     }
     const jsonDb = path.join(__dirname, 'data', 'users.json');
     if (fs.existsSync(jsonDb)) {
-      execSync(`cp "${jsonDb}" "${tmpDir}/data/users.json"`);
+      fs.copyFileSync(jsonDb, path.join(tmpDir, 'data', 'users.json'));
     }
 
     // 4. Copy vpn.env from the running environment (reconstruct from env vars)
@@ -739,41 +867,25 @@ app.get('/api/backup/export', authMiddleware, async (req, res) => {
 
     // 5. Write a manifest for verification on import
     const manifest = {
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       serverIp: SERVER_IP,
-      contents: ['ipsec.d/', 'ppp/', 'data/', 'vpn.env']
+      contents: ['ipsec.d/', 'ppp/', 'wireguard/', 'xray/', 'data/', 'vpn.env']
     };
     fs.writeFileSync(`${tmpDir}/manifest.json`, JSON.stringify(manifest, null, 2));
 
-    // Stream as .tar.gz
+    await createEncryptedArchive(tmpDir, encryptedPath);
     const dateStr = new Date().toISOString().slice(0, 10);
-    const filename = `vpn_backup_${dateStr}.tar.gz`;
-
-    res.setHeader('Content-Type', 'application/gzip');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-
-    const archive = archiver('tar', { gzip: true, gzipOptions: { level: 9 } });
-    archive.on('error', (err) => {
-      console.error('[Backup] Archive error:', err);
-      if (!res.headersSent) res.status(500).json({ error: err.message });
-    });
-    archive.on('end', () => {
+    const filename = `omnivpn_backup_${dateStr}.ovpnbackup`;
+    return res.download(encryptedPath, filename, () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(encryptedPath, { force: true });
     });
-
-    archive.pipe(res);
-    archive.directory(`${tmpDir}/ipsec.d`, 'ipsec.d');
-    archive.directory(`${tmpDir}/ppp`, 'ppp');
-    archive.directory(`${tmpDir}/wireguard`, 'wireguard');
-    archive.directory(`${tmpDir}/xray`, 'xray');
-    archive.directory(`${tmpDir}/data`, 'data');
-    archive.file(`${tmpDir}/vpn.env`, { name: 'vpn.env' });
-    archive.file(`${tmpDir}/manifest.json`, { name: 'manifest.json' });
-    archive.finalize();
   } catch (err) {
     if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true, force: true });
-    res.status(500).json({ error: err.message });
+    fs.rmSync(encryptedPath, { force: true });
+    console.error('[Backup] Export failed:', err.message);
+    sendServerError(res, err, 'The encrypted backup could not be created.');
   }
 });
 
@@ -783,12 +895,12 @@ app.post('/api/backup/import', authMiddleware, upload.single('backup'), async (r
   }
 
   const uploadedPath = req.file.path;
-  const extractDir = `/tmp/vpn_restore_${Date.now()}`;
+  const extractDir = fs.mkdtempSync('/tmp/omnivpn-restore-');
+  const tarPath = `${extractDir}.tar.gz`;
 
   try {
-    // Extract the tar.gz
-    execSync(`mkdir -p "${extractDir}"`);
-    execSync(`tar -xzf "${uploadedPath}" -C "${extractDir}"`);
+    await decryptArchive(uploadedPath, tarPath);
+    await validateAndExtract(tarPath, extractDir);
 
     // Validate manifest
     const manifestPath = path.join(extractDir, 'manifest.json');
@@ -797,7 +909,7 @@ app.post('/api/backup/import', authMiddleware, upload.single('backup'), async (r
     }
 
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-    if (!manifest.version || !manifest.exportedAt) {
+    if (manifest.version !== 2 || typeof manifest.exportedAt !== 'string') {
       throw new Error('Invalid backup: corrupt manifest.');
     }
 
@@ -811,23 +923,25 @@ app.post('/api/backup/import', authMiddleware, upload.single('backup'), async (r
 
     // 1. Restore IPsec certificates & keys
     if (fs.existsSync(ipsecDir)) {
-      execSync(`docker cp "${ipsecDir}/." ${VPN_CONTAINER}:/etc/ipsec.d/`);
+      const result = await runFile('docker', ['cp', `${ipsecDir}/.`, `${VPN_CONTAINER}:/etc/ipsec.d/`], { timeout: 60_000 });
+      if (!result.success) throw new Error(`IPsec restore failed: ${result.error}`);
       restored.push('IPsec certificates & keys');
     }
 
     // 2. Restore L2TP/PPP credentials
     if (fs.existsSync(pppDir)) {
-      execSync(`docker cp "${pppDir}/." ${VPN_CONTAINER}:/etc/ppp/`);
+      const result = await runFile('docker', ['cp', `${pppDir}/.`, `${VPN_CONTAINER}:/etc/ppp/`], { timeout: 60_000 });
+      if (!result.success) throw new Error(`PPP restore failed: ${result.error}`);
       restored.push('L2TP credentials');
     }
     
     // 2.5 Restore WireGuard & Xray
     if (fs.existsSync(wgDir)) {
-      execSync(`mkdir -p /etc/wireguard && cp -r "${wgDir}/"* /etc/wireguard/ || true`);
+      copyDirectoryContents(wgDir, '/etc/wireguard');
       restored.push('WireGuard configuration');
     }
     if (fs.existsSync(xrayDir)) {
-      execSync(`mkdir -p /etc/xray && cp -r "${xrayDir}/"* /etc/xray/ || true`);
+      copyDirectoryContents(xrayDir, '/etc/xray');
       restored.push('Shadowsocks configuration');
     }
 
@@ -835,7 +949,7 @@ app.post('/api/backup/import', authMiddleware, upload.single('backup'), async (r
     if (fs.existsSync(dataDir)) {
       const targetDir = path.join(__dirname, 'data');
       if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
-      execSync(`cp -r "${dataDir}/"* "${targetDir}/" || true`);
+      copyDirectoryContents(dataDir, targetDir);
       restored.push('Activity logs & Users JSON');
     }
 
@@ -847,30 +961,25 @@ app.post('/api/backup/import', authMiddleware, upload.single('backup'), async (r
       envNote = 'Your vpn.env configuration is included in the backup. Update your host vpn.env with these values if migrating to a new server.';
     }
 
-    // 5. Restart VPN container to pick up restored certs
-    exec(`docker restart ${VPN_CONTAINER}`, (err) => {
-      if (err) console.error('[Backup] VPN container restart error:', err.message);
-      else console.log('[Backup] VPN container restarted after import.');
-    });
-
-    // Cleanup
-    fs.unlinkSync(uploadedPath);
-    // 5. Restart VPN services
-    execSync(`docker restart ${VPN_CONTAINER}`);
-    try {
-      execSync(`docker restart wireguard xray`);
-    } catch (e) {
-      console.error("Failed to restart WG/SS containers", e.message);
+    const restartResults = await Promise.all([
+      restartContainer(VPN_CONTAINER),
+      restartContainer('wireguard'),
+      restartContainer('xray')
+    ]);
+    if (restartResults.some((result) => !result.success)) {
+      throw new Error('Configuration restored, but one or more VPN services did not restart cleanly.');
     }
 
     fs.rmSync(extractDir, { recursive: true, force: true });
+    fs.rmSync(tarPath, { force: true });
     if (fs.existsSync(uploadedPath)) fs.rmSync(uploadedPath, { force: true });
 
     res.json({ success: true, restored });
   } catch (err) {
     if (fs.existsSync(extractDir)) fs.rmSync(extractDir, { recursive: true, force: true });
+    fs.rmSync(tarPath, { force: true });
     if (fs.existsSync(uploadedPath)) fs.rmSync(uploadedPath, { force: true });
-    res.status(500).json({ error: err.message });
+    sendServerError(res, err, 'The backup could not be authenticated or restored.');
   }
 });
 

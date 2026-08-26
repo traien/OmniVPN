@@ -1,571 +1,71 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VPN Control Panel</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f2efe7">
+  <title>OmniVPN Command Center</title>
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.tailwindcss.com"></script>
 </head>
-<body class="bg-[#0a0c10] text-slate-100 min-h-screen flex flex-col">
-
-  <!-- =========================================================================
-       LOGIN GATE
-       ========================================================================= -->
-  <div id="login-screen" class="fixed inset-0 bg-[#0a0c10] z-50 flex items-center justify-center p-4">
-    <div class="w-full max-w-sm bg-[#12151c] border border-[#242b38] rounded-xl p-8 shadow-2xl">
-      <div class="flex items-center gap-3 mb-6">
-        <div class="w-3 h-3 rounded-full bg-emerald-500 shadow-[0_0_8px_#10b981]"></div>
-        <h1 class="text-lg font-bold tracking-tight">VPN Control Panel</h1>
-      </div>
-      <p class="text-xs text-slate-400 mb-6">Enter your master administrator key to manage the VPN gateway.</p>
-      
-      <form id="login-form" class="space-y-4">
-        <div>
-          <label class="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Admin Key</label>
-          <input type="password" id="login-password" required placeholder="••••••••••••" 
-                 class="w-full px-3.5 py-2.5 bg-[#0a0c10] border border-[#242b38] rounded-lg text-sm focus:outline-none focus:border-blue-500 transition-colors font-mono">
-        </div>
-        <button type="submit" class="w-full btn-primary justify-center py-2.5 text-sm">
-          Authenticate & Access
-        </button>
+<body>
+  <a class="skip-link" href="#main-content">Skip to main content</a>
+  <section id="login-screen" class="login-shell" aria-labelledby="login-title">
+    <div class="login-mark" aria-hidden="true">O</div>
+    <div class="login-panel">
+      <p class="eyebrow">Private infrastructure</p>
+      <h1 id="login-title">Enter the command center.</h1>
+      <p class="lede">One secure surface for tunnel health, client access, and network policy.</p>
+      <form id="login-form" novalidate>
+        <label for="login-password">Administrator password</label>
+        <input id="login-password" name="password" type="password" required minlength="16" autocomplete="current-password" aria-describedby="login-hint login-error">
+        <p id="login-hint" class="field-hint">Use the password configured as <code>WEBUI_PASSWORD</code>.</p>
+        <p id="login-error" class="field-error" role="alert" hidden></p>
+        <button class="button button-primary button-wide" type="submit">Open command center</button>
       </form>
-      <div id="login-error" class="text-rose-400 text-xs mt-3 hidden font-medium text-center"></div>
     </div>
-  </div>
+  </section>
 
-  <!-- =========================================================================
-       MAIN DASHBOARD APPLICATION
-       ========================================================================= -->
-  <div id="app-container" class="hidden flex-1 flex flex-col">
-    
-    <!-- Top Navigation Header -->
-    <header class="border-b border-[#242b38] bg-[#12151c]/80 backdrop-blur sticky top-0 z-30">
-      <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
-        
-        <!-- Logo & Navigation Tabs -->
-        <div class="flex items-center gap-4 lg:gap-6 shrink-0 overflow-x-auto no-scrollbar">
-          <div class="flex items-center gap-2.5 shrink-0">
-            <div class="pulse-beacon"></div>
-            <span class="font-bold text-sm tracking-tight text-white whitespace-nowrap">VPN Control Panel</span>
-          </div>
-
-          <!-- Section Switcher Tabs -->
-          <nav class="hidden md:flex items-center gap-1.5 bg-[#0a0c10] p-1 border border-[#242b38] rounded-lg shrink-0">
-            <button onclick="switchTab('overview')" id="tab-overview" class="nav-tab active whitespace-nowrap">
-              <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
-              <span>Gateway & Clients</span>
-            </button>
-            <button onclick="switchTab('logs')" id="tab-logs" class="nav-tab whitespace-nowrap">
-              <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"></path></svg>
-              <span>Browsing Activity & Logs</span>
-            </button>
-          </nav>
-        </div>
-
-        <!-- Real-time Telemetry & Actions -->
-        <div class="flex items-center gap-3 shrink-0 ml-4">
-          <div class="hidden xl:flex items-center gap-4 text-xs font-mono text-slate-400 border-r border-[#242b38] pr-4 shrink-0">
-            <div>IP: <span id="stat-ip" class="text-slate-200 font-semibold">37.27.11.96</span></div>
-            <div>Connected: <span id="stat-tunnels" class="text-emerald-400 font-bold">0</span></div>
-            <div>Uptime: <span id="stat-uptime" class="text-slate-200">-</span></div>
-          </div>
-
-          <button onclick="exportBackup()" class="btn-secondary text-xs shrink-0 whitespace-nowrap" title="Export Full VPN Backup">
-            <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-            <span class="hidden sm:inline">Export</span>
-          </button>
-
-          <button onclick="openImportModal()" class="btn-secondary text-xs shrink-0 whitespace-nowrap" title="Import VPN Backup">
-            <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
-            <span class="hidden sm:inline">Import</span>
-          </button>
-
-          <button onclick="showDiagnostics()" class="btn-secondary text-xs shrink-0 whitespace-nowrap" title="View IPsec Daemon Output">
-            <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-            <span class="hidden md:inline">Telemetry</span>
-          </button>
-
-          <button onclick="logout()" class="btn-icon shrink-0" title="Logout">
-            <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
-          </button>
-        </div>
-
-      </div>
+  <div id="app-container" class="app-shell" hidden>
+    <header class="topbar">
+      <a class="brand" href="#main-content" aria-label="OmniVPN home"><span class="brand-mark" aria-hidden="true">O</span><span><strong>OmniVPN</strong><small>Command Center</small></span></a>
+      <div class="topbar-status" aria-live="polite"><span class="status-dot" aria-hidden="true"></span><span id="header-health">Checking gateway</span><span class="topbar-divider" aria-hidden="true"></span><span id="stat-ip">—</span></div>
+      <div class="topbar-actions"><button class="button button-quiet" id="action-export" type="button">Export backup</button><button class="button button-quiet" id="action-import" type="button">Restore</button><button class="button button-icon" id="action-diagnostics" type="button" aria-label="Open gateway diagnostics">⌁</button><button class="button button-icon" id="action-logout" type="button" aria-label="Sign out">↗</button></div>
     </header>
 
-    <!-- Main Content Area -->
-    <main class="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+    <div class="workspace">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <nav class="section-tabs" role="tablist" aria-label="Command center views"><button id="tab-overview" role="tab" aria-selected="true" aria-controls="view-overview" tabindex="0" data-tab="overview"><span aria-hidden="true">01</span> Gateway</button><button id="tab-logs" role="tab" aria-selected="false" aria-controls="view-logs" tabindex="-1" data-tab="logs"><span aria-hidden="true">02</span> DNS activity</button></nav>
+        <div class="sidebar-readout"><p class="eyebrow">Live session</p><dl><div><dt>Connected</dt><dd id="stat-tunnels">0</dd></div><div><dt>Uptime</dt><dd id="stat-uptime">—</dd></div><div><dt>Scope</dt><dd id="stat-scope">—</dd></div></dl></div>
+      </aside>
 
-      <!-- Mobile Tab Bar -->
-      <div class="flex md:hidden items-center gap-1.5 bg-[#12151c] p-1 border border-[#242b38] rounded-lg">
-        <button onclick="switchTab('overview')" id="tab-overview-m" class="nav-tab active flex-1 justify-center">Overview</button>
-        <button onclick="switchTab('logs')" id="tab-logs-m" class="nav-tab flex-1 justify-center">Browsing Logs</button>
-      </div>
-
-      <!-- =====================================================================
-           VIEW 1: GATEWAY OVERVIEW & CLIENTS
-           ===================================================================== -->
-      <div id="view-overview" class="space-y-6">
-        
-        <!-- Server Overview Grid -->
-        <section class="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div class="surface-card p-4">
-            <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Gateway Endpoint</div>
-            <div id="card-ip" class="text-base font-bold font-mono text-white">37.27.11.96</div>
-            <div class="text-[11px] text-slate-400 mt-1 flex items-center gap-1.5">
-              <span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span> UDP 500 / 4500
-            </div>
-          </div>
-
-          <div class="surface-card p-4">
-            <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">IPsec PSK</div>
-            <div class="flex items-center justify-between">
-              <div id="card-psk" class="text-sm font-bold font-mono text-amber-400 truncate">••••••••••••</div>
-              <button onclick="togglePSK()" class="text-slate-400 hover:text-white p-1 text-xs">
-                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"></path></svg>
-              </button>
-            </div>
-            <div class="text-[11px] text-slate-400 mt-1">Pre-shared key for L2TP clients</div>
-          </div>
-
-          <div class="surface-card p-4">
-            <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Active Tunnels</div>
-            <div id="card-tunnels" class="text-base font-bold font-mono text-emerald-400">0 Active</div>
-            <div class="text-[11px] text-slate-400 mt-1">Live connected devices</div>
-          </div>
-
-          <div class="surface-card p-4">
-            <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Memory & Load</div>
-            <div id="card-load" class="text-base font-bold font-mono text-slate-200">0.00 / 0%</div>
-            <div class="text-[11px] text-slate-400 mt-1">System resource allocation</div>
-          </div>
+      <main id="main-content" class="main-content" tabindex="-1">
+        <section id="view-overview" role="tabpanel" aria-labelledby="tab-overview">
+          <header class="page-intro"><div><p class="eyebrow">Gateway overview</p><h1>Your private edge, at a glance.</h1></div><p>Live health and access controls for every supported tunnel.</p></header>
+          <section class="signal-strip" aria-label="Gateway metrics"><article><span>Endpoint</span><strong id="card-ip">—</strong><small>UDP 500 / 4500</small></article><article><span>IPsec key</span><strong id="card-psk">Protected</strong><button class="text-button" id="action-toggle-psk" type="button">Reveal briefly</button></article><article><span>Active tunnels</span><strong id="card-tunnels">0</strong><small>Connected now</small></article><article><span>Host load</span><strong id="card-load">—</strong><small>Load / memory</small></article></section>
+          <section class="telemetry-layout">
+            <article class="chart-panel"><header class="section-heading"><div><p class="eyebrow">Throughput</p><h2>Network pulse</h2></div><div class="chart-legend"><span>↓ <strong id="bw-rx-current">0 KB/s</strong></span><span>↑ <strong id="bw-tx-current">0 KB/s</strong></span></div></header><div class="chart-frame"><svg id="bandwidth-chart" role="img" aria-labelledby="bandwidth-title bandwidth-desc" viewBox="0 0 600 180" preserveAspectRatio="none"><title id="bandwidth-title">Gateway bandwidth over the last minute</title><desc id="bandwidth-desc">Download and upload rates sampled from host network interfaces.</desc><path class="chart-grid" d="M0 45H600M0 90H600M0 135H600"></path><polygon id="bw-rx-area" points="" class="chart-area chart-area-rx"></polygon><polyline id="bw-rx-line" points="" class="chart-line chart-line-rx"></polyline><polyline id="bw-tx-line" points="" class="chart-line chart-line-tx"></polyline></svg><p id="bw-chart-empty" class="chart-empty">Collecting the first samples…</p></div></article>
+            <article class="connection-panel"><header class="section-heading"><div><p class="eyebrow">Presence</p><h2>Live tunnels</h2></div><span id="devices-badge" class="status-pill">0 online</span></header><div id="devices-list" class="connection-list"></div><p id="devices-empty" class="empty-state">No active tunnels. New connections will appear here automatically.</p></article>
+          </section>
+          <section class="clients-section"><header class="section-heading section-heading-wide"><div><p class="eyebrow">Access directory</p><h2>Client profiles</h2></div><div class="section-actions"><label class="search-field" for="user-search"><span class="sr-only">Filter clients</span><input id="user-search" type="search" placeholder="Filter clients" autocomplete="off"></label><button class="button button-primary" id="action-new-client" type="button">Create client</button></div></header><div id="users-grid" class="client-list"></div><div id="users-empty" class="empty-state empty-state-action" hidden><p>No client profiles yet.</p><button class="text-button" id="action-first-client" type="button">Create the first client</button></div></section>
         </section>
 
-        <!-- Live Real-Time Bandwidth Telemetry Card -->
-        <section class="surface-card p-6">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-4 border-b border-[#242b38]">
-            <div class="flex items-center gap-2.5">
-              <div class="w-2 h-2 rounded-full bg-blue-500 shadow-[0_0_6px_#3b82f6]"></div>
-              <h2 class="text-base font-bold tracking-tight text-white">Live Bandwidth Throughput</h2>
-            </div>
-            <div class="flex items-center gap-4 text-xs font-mono">
-              <div class="flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
-                <span class="text-slate-400">Download:</span>
-                <span id="bw-rx-current" class="text-emerald-400 font-bold">0.0 Mbps</span>
-              </div>
-              <div class="flex items-center gap-1.5">
-                <span class="w-2 h-2 rounded-full bg-blue-500"></span>
-                <span class="text-slate-400">Upload:</span>
-                <span id="bw-tx-current" class="text-blue-400 font-bold">0.0 Mbps</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- Canvas / SVG Dynamic Chart Container -->
-          <div class="w-full h-32 bg-[#0a0c10] border border-[#242b38] rounded-lg p-2 relative overflow-hidden flex items-end">
-            <svg id="bandwidth-chart" class="w-full h-full" preserveAspectRatio="none" viewBox="0 0 300 80">
-              <defs>
-                <linearGradient id="rxGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" stop-color="#10b981" stop-opacity="0.3"/>
-                  <stop offset="100%" stop-color="#10b981" stop-opacity="0"/>
-                </linearGradient>
-                <linearGradient id="txGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-                  <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.3"/>
-                  <stop offset="100%" stop-color="#3b82f6" stop-opacity="0"/>
-                </linearGradient>
-              </defs>
-              <polygon id="bw-rx-area" points="" fill="url(#rxGrad)" />
-              <polyline id="bw-rx-line" points="" fill="none" stroke="#10b981" stroke-width="1.5" stroke-linecap="round" />
-              <polygon id="bw-tx-area" points="" fill="url(#txGrad)" />
-              <polyline id="bw-tx-line" points="" fill="none" stroke="#3b82f6" stroke-width="1.5" stroke-linecap="round" />
-            </svg>
-            <div id="bw-chart-empty" class="absolute inset-0 flex items-center justify-center text-xs text-slate-500 font-mono">
-              Sampling live network telemetry...
-            </div>
-          </div>
+        <section id="view-logs" role="tabpanel" aria-labelledby="tab-logs" hidden>
+          <header class="page-intro"><div><p class="eyebrow">DNS activity</p><h1>Network intent, made visible.</h1></div><p>Private by default. Records appear only when <code>DNS_LOGGING_ENABLED=true</code>.</p></header>
+          <section class="log-summary"><article><span>Queries today</span><strong id="stat-log-today">0</strong></article><article><span>Blocked today</span><strong id="stat-log-blocked">0</strong></article><div><span>Frequent domains</span><div id="top-domains-chips" class="domain-list"></div></div></section>
+          <section class="log-section"><header class="section-heading section-heading-wide"><div><p class="eyebrow">Event stream</p><h2>Recent requests</h2></div><div class="log-filters"><label><span class="sr-only">Client</span><select id="log-filter-client"><option value="">All clients</option></select></label><label><span class="sr-only">Status</span><select id="log-filter-status"><option value="">All results</option><option value="RESOLVED">Resolved</option><option value="BLOCKED">Blocked</option></select></label><label><span class="sr-only">Search DNS activity</span><input id="log-search" type="search" placeholder="Search domains"></label><button class="button button-quiet" id="action-export-logs" type="button">Export CSV</button><button class="button button-danger" id="action-clear-logs" type="button">Clear history</button></div></header><div class="table-scroll" tabindex="0" aria-label="Scrollable DNS activity table"><table><caption class="sr-only">Recent DNS requests by VPN clients</caption><thead><tr><th>Time</th><th>Client</th><th>Address</th><th>Domain</th><th>Result</th><th>Type</th></tr></thead><tbody id="logs-tbody"></tbody></table></div><p id="logs-empty" class="empty-state" hidden>No DNS activity matches these filters.</p><footer class="pagination"><span id="logs-pagination-info">Showing 0–0 of 0</span><div><button class="button button-quiet" id="btn-prev-page" type="button">Previous</button><button class="button button-quiet" id="btn-next-page" type="button">Next</button></div></footer></section>
         </section>
-
-        <!-- Live Connected Devices Section with GeoIP -->
-        <section class="surface-card p-6">
-          <div class="flex items-center justify-between mb-4">
-            <div class="flex items-center gap-2.5">
-              <div class="w-2 h-2 rounded-full bg-emerald-500"></div>
-              <h2 class="text-base font-bold tracking-tight text-white">Live Connected Devices</h2>
-            </div>
-            <span id="devices-badge" class="badge badge-emerald">0 Online</span>
-          </div>
-
-          <div id="devices-container" class="overflow-x-auto">
-            <table class="w-full text-left text-xs font-mono">
-              <thead>
-                <tr class="border-b border-[#242b38] text-slate-400 text-[11px]">
-                  <th class="pb-2 font-semibold">CLIENT / USER</th>
-                  <th class="pb-2 font-semibold">LOCATION / GEOIP</th>
-                  <th class="pb-2 font-semibold">PROTOCOL</th>
-                  <th class="pb-2 font-semibold">REMOTE IP</th>
-                  <th class="pb-2 font-semibold">VIRTUAL VPN IP</th>
-                  <th class="pb-2 font-semibold">DATA IN / OUT</th>
-                  <th class="pb-2 font-semibold">DURATION</th>
-                  <th class="pb-2 font-semibold text-right">STATUS</th>
-                </tr>
-              </thead>
-              <tbody id="devices-tbody" class="divide-y divide-[#242b38]/50">
-                <!-- Injected dynamically -->
-              </tbody>
-            </table>
-            <div id="devices-empty" class="py-6 text-center text-xs text-slate-500 font-sans">
-              No devices currently connected. Devices will appear here automatically when connected.
-            </div>
-          </div>
-        </section>
-
-        <!-- Client Accounts Management Section -->
-        <section class="surface-card p-6">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6 pb-6 border-b border-[#242b38]">
-            <div>
-              <h2 class="text-lg font-bold tracking-tight text-white">VPN Client Profiles</h2>
-              <p class="text-xs text-slate-400 mt-0.5">Manage IKEv2 certificates, native L2TP client credentials, and per-client AdBlock filters.</p>
-            </div>
-
-            <div class="flex items-center gap-3">
-              <div class="relative">
-                <input type="text" id="user-search" placeholder="Filter clients..." 
-                       class="px-3 py-1.5 pl-8 bg-[#0a0c10] border border-[#242b38] rounded-md text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors w-44">
-                <svg class="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-              </div>
-
-              <button onclick="openAddUserModal()" class="btn-primary text-xs">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
-                <span>New Client</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Users List / Cards Container -->
-          <div id="users-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            <!-- Dynamic cards injected via JS -->
-          </div>
-
-          <!-- Empty State -->
-          <div id="users-empty" class="hidden py-12 text-center">
-            <div class="w-10 h-10 mx-auto rounded-full bg-[#1f2532] border border-[#242b38] flex items-center justify-center text-slate-400 mb-3">
-              <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-            </div>
-            <div class="text-sm font-semibold text-slate-300">No VPN clients found</div>
-            <p class="text-xs text-slate-500 mt-1 max-w-xs mx-auto">Create your first VPN account to download native connection files for Windows, Mac, or mobile devices.</p>
-          </div>
-        </section>
-
-      </div>
-
-      <!-- =====================================================================
-           VIEW 2: BROWSING ACTIVITY & DNS LOGS
-           ===================================================================== -->
-      <div id="view-logs" class="hidden space-y-6">
-        
-        <!-- Activity Stats Banner -->
-        <section class="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div class="surface-card p-4">
-            <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Today's Queries</div>
-            <div id="stat-log-today" class="text-xl font-bold font-mono text-emerald-400">0</div>
-            <div class="text-[11px] text-slate-500 mt-1">Domain lookups resolved today</div>
-          </div>
-
-          <div class="surface-card p-4">
-            <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">Ads & Trackers Blocked</div>
-            <div id="stat-log-blocked" class="text-xl font-bold font-mono text-rose-400">0</div>
-            <div class="text-[11px] text-slate-500 mt-1">Blocked by active AdBlock rules</div>
-          </div>
-
-          <div class="surface-card p-4 md:col-span-2">
-            <div class="text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-2">Top Visited Websites Today</div>
-            <div id="top-domains-chips" class="flex flex-wrap gap-1.5">
-              <span class="text-xs text-slate-500 italic">No queries recorded yet today</span>
-            </div>
-          </div>
-        </section>
-
-        <!-- Logs Filter & Search Toolbar -->
-        <section class="surface-card p-6">
-          <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-6 pb-6 border-b border-[#242b38]">
-            <div>
-              <h2 class="text-lg font-bold tracking-tight text-white">Client Browsing History</h2>
-              <p class="text-xs text-slate-400 mt-0.5">Live stream of websites and domains requested by connected VPN devices.</p>
-            </div>
-
-            <div class="flex flex-wrap items-center gap-2.5">
-              <!-- Client Select Dropdown -->
-              <select id="log-filter-client" class="px-3 py-1.5 bg-[#0a0c10] border border-[#242b38] rounded-md text-xs font-mono text-slate-200 focus:outline-none focus:border-blue-500">
-                <option value="">All Clients</option>
-              </select>
-
-              <!-- Status Filter Dropdown -->
-              <select id="log-filter-status" class="px-3 py-1.5 bg-[#0a0c10] border border-[#242b38] rounded-md text-xs font-mono text-slate-200 focus:outline-none focus:border-blue-500">
-                <option value="">All Statuses</option>
-                <option value="RESOLVED">Resolved Only</option>
-                <option value="BLOCKED">Blocked Only 🛡️</option>
-              </select>
-
-              <!-- Domain Search -->
-              <div class="relative">
-                <input type="text" id="log-search" placeholder="Search domain..." 
-                       class="px-3 py-1.5 pl-8 bg-[#0a0c10] border border-[#242b38] rounded-md text-xs text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500 transition-colors w-40 sm:w-48">
-                <svg class="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-              </div>
-
-              <!-- Export CSV Button -->
-              <button onclick="exportLogsCsv()" class="btn-secondary text-xs">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-                <span>Export CSV</span>
-              </button>
-
-              <!-- Clear Logs Button -->
-              <button onclick="clearAllLogs()" class="btn-icon btn-danger" title="Clear All Stored Logs">
-                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-              </button>
-            </div>
-          </div>
-
-          <!-- Logs Table -->
-          <div class="overflow-x-auto">
-            <table class="w-full text-left text-xs font-mono">
-              <thead>
-                <tr class="border-b border-[#242b38] text-slate-400 text-[11px]">
-                  <th class="pb-2 font-semibold w-36">TIMESTAMP</th>
-                  <th class="pb-2 font-semibold w-40">CLIENT / USER</th>
-                  <th class="pb-2 font-semibold w-32">INTERNAL IP</th>
-                  <th class="pb-2 font-semibold">WEBSITE / DOMAIN</th>
-                  <th class="pb-2 font-semibold text-center w-28">STATUS</th>
-                  <th class="pb-2 font-semibold text-right w-16">TYPE</th>
-                </tr>
-              </thead>
-              <tbody id="logs-tbody" class="divide-y divide-[#242b38]/50">
-                <!-- Injected dynamically -->
-              </tbody>
-            </table>
-
-            <div id="logs-empty" class="hidden py-12 text-center text-xs text-slate-500 font-sans">
-              No browsing activity found matching your search.
-            </div>
-          </div>
-
-          <!-- Pagination Controls -->
-          <div class="mt-6 pt-4 border-t border-[#242b38] flex items-center justify-between text-xs text-slate-400 font-mono">
-            <div id="logs-pagination-info">Showing 0-0 of 0</div>
-            <div class="flex items-center gap-2">
-              <button id="btn-prev-page" onclick="changeLogPage(-1)" class="btn-secondary text-xs py-1 px-3" disabled>&larr; Prev</button>
-              <button id="btn-next-page" onclick="changeLogPage(1)" class="btn-secondary text-xs py-1 px-3" disabled>Next &rarr;</button>
-            </div>
-          </div>
-
-        </section>
-
-      </div>
-
-    </main>
-
-    <!-- Footer -->
-    <footer class="border-t border-[#242b38] py-4 text-center text-xs text-slate-500 font-mono">
-      VPN Control Panel • 37.27.11.96
-    </footer>
-
-  </div>
-
-  <!-- =========================================================================
-       MODALS
-       ========================================================================= -->
-
-  <!-- Modal: Add New User -->
-  <div id="modal-add-user" class="modal-backdrop">
-    <div class="modal-content p-6">
-      <div class="flex items-center justify-between pb-4 border-b border-[#242b38] mb-4">
-        <h3 class="text-sm font-bold text-white uppercase tracking-wider">Generate New Client Account</h3>
-        <button onclick="closeModal('modal-add-user')" class="text-slate-400 hover:text-white">&times;</button>
-      </div>
-
-      <form id="form-add-user" class="space-y-4">
-        <div>
-          <label class="block text-xs font-semibold text-slate-400 mb-1.5">Client Identifier (Username)</label>
-          <input type="text" id="new-username" required placeholder="e.g. john_laptop" pattern="[a-zA-Z0-9_-]+"
-                 class="w-full px-3 py-2 bg-[#0a0c10] border border-[#242b38] rounded-md text-xs font-mono text-slate-200 focus:outline-none focus:border-blue-500">
-          <p class="text-[11px] text-slate-500 mt-1">Used for IKEv2 certificates and L2TP credentials.</p>
-        </div>
-
-        <div>
-          <label class="block text-xs font-semibold text-slate-400 mb-1.5">L2TP Account Password (Optional)</label>
-          <input type="password" id="new-password" placeholder="Leave blank to auto-generate"
-                 class="w-full px-3 py-2 bg-[#0a0c10] border border-[#242b38] rounded-md text-xs font-mono text-slate-200 focus:outline-none focus:border-blue-500">
-        </div>
-
-        <div class="pt-2 flex items-center justify-end gap-2">
-          <button type="button" onclick="closeModal('modal-add-user')" class="btn-secondary text-xs">Cancel</button>
-          <button type="submit" id="btn-create-submit" class="btn-primary text-xs">
-            <span>Generate Client</span>
-          </button>
-        </div>
-      </form>
+      </main>
     </div>
   </div>
 
-  <!-- Modal: Client Quick Setup Guide -->
-  <div id="modal-guide" class="modal-backdrop">
-    <div class="modal-content p-6 max-w-xl">
-      <div class="flex items-center justify-between pb-4 border-b border-[#242b38] mb-4">
-        <div class="flex items-center gap-2">
-          <h3 class="text-sm font-bold text-white uppercase tracking-wider">Client Connection Guide:</h3>
-          <span id="guide-username" class="text-xs font-mono px-2 py-0.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded"></span>
-        </div>
-        <button onclick="closeModal('modal-guide')" class="text-slate-400 hover:text-white">&times;</button>
-      </div>
+  <dialog id="modal-add-user" aria-labelledby="add-user-title"><form id="form-add-user" class="dialog-content" method="dialog"><header><div><p class="eyebrow">Provision access</p><h2 id="add-user-title">Create a client</h2></div><button class="dialog-close" type="button" data-close-dialog aria-label="Close">×</button></header><label for="new-username">Client name</label><input id="new-username" required maxlength="64" pattern="[A-Za-z0-9_-]+" autocomplete="off" aria-describedby="username-hint"><p id="username-hint" class="field-hint">Letters, numbers, dashes, and underscores.</p><label for="new-password">Shared password</label><input id="new-password" type="password" minlength="12" maxlength="128" autocomplete="new-password" aria-describedby="password-hint"><p id="password-hint" class="field-hint">Leave blank to generate a strong password.</p><footer><button class="button button-quiet" type="button" data-close-dialog>Keep directory unchanged</button><button class="button button-primary" id="btn-create-submit" type="submit">Create client</button></footer></form></dialog>
+  <dialog id="modal-guide" aria-labelledby="guide-title"><div class="dialog-content dialog-wide"><header><div><p class="eyebrow">Connection kit</p><h2 id="guide-title">Connect <span id="guide-username"></span></h2></div><button class="dialog-close" type="button" data-close-dialog aria-label="Close">×</button></header><div class="profile-password"><span>Profile import password</span><code id="guide-config-password">Loading…</code><button class="text-button" type="button" data-copy="guide-config-password">Copy password</button></div><div class="guide-grid"><article><h3>Windows</h3><p>Download the protected client certificate and guided installer.</p><button id="guide-btn-win-zip" class="button button-primary" type="button">Download Windows kit</button></article><article><h3>Apple</h3><p>Install the native IKEv2 configuration profile.</p><a id="guide-link-apple" class="button button-quiet" href="#">Download Apple profile</a></article><article><h3>Android</h3><p>Import the StrongSwan configuration package.</p><a id="guide-link-android" class="button button-quiet" href="#">Download Android profile</a></article></div><details><summary>Manual PowerShell setup</summary><pre id="guide-powershell-cmd"></pre><button class="text-button" type="button" data-copy="guide-powershell-cmd">Copy command</button></details></div></dialog>
+  <dialog id="modal-diag" aria-labelledby="diag-title"><div class="dialog-content dialog-wide"><header><div><p class="eyebrow">Raw signal</p><h2 id="diag-title">Gateway diagnostics</h2></div><button class="dialog-close" type="button" data-close-dialog aria-label="Close">×</button></header><pre id="diag-raw-output" class="diagnostic-output"></pre></div></dialog>
+  <dialog id="modal-extra-configs" aria-labelledby="config-title"><div class="dialog-content dialog-wide"><header><div><p class="eyebrow">Modern protocols</p><h2 id="config-title">Configs for <span id="extra-username"></span></h2></div><button class="dialog-close" type="button" data-close-dialog aria-label="Close">×</button></header><div class="config-grid"><article><h3>WireGuard</h3><div id="wg-qrcode" class="qr-code" role="img" aria-label="WireGuard configuration QR code"></div><pre id="wg-config-text"></pre><button class="text-button" type="button" data-copy="wg-config-text">Copy WireGuard config</button></article><article><h3>Shadowsocks</h3><div id="ss-qrcode" class="qr-code" role="img" aria-label="Shadowsocks configuration QR code"></div><pre id="ss-config-text"></pre><button class="text-button" type="button" data-copy="ss-config-text">Copy Shadowsocks URI</button></article></div></div></dialog>
+  <dialog id="modal-import" aria-labelledby="import-title"><div class="dialog-content"><header><div><p class="eyebrow">Disaster recovery</p><h2 id="import-title">Restore encrypted backup</h2></div><button class="dialog-close" type="button" data-close-dialog aria-label="Close">×</button></header><p class="warning-copy">Restoring replaces current certificates, accounts, and credentials, then restarts VPN services.</p><label for="import-file">OmniVPN backup</label><input id="import-file" type="file" accept=".ovpnbackup"><p class="field-hint">Only authenticated <code>.ovpnbackup</code> files using this server’s backup passphrase are accepted.</p><div id="import-progress" class="progress-message" role="status" hidden>Validating and restoring the encrypted archive…</div><footer><button class="button button-quiet" type="button" data-close-dialog>Keep current state</button><button class="button button-danger" id="btn-import-submit" type="button">Restore backup</button></footer></div></dialog>
 
-      <div class="space-y-4 text-xs">
-        <!-- Windows 1-Click Method -->
-        <div class="p-3.5 bg-[#0a0c10] border border-[#242b38] rounded-lg">
-          <div class="font-bold text-slate-200 mb-1 flex items-center justify-between">
-            <span>🪟 Windows 10 & 11 (1-Click Installer)</span>
-            <button id="guide-btn-win-zip" class="text-blue-400 hover:underline font-normal text-[11px]">Download ZIP Archive</button>
-          </div>
-          <p class="text-slate-400 text-[11px]">Download the ZIP, extract it, and right-click <code class="text-slate-300 font-mono">install_windows_ikev2.bat</code> $\rightarrow$ <strong>Run as administrator</strong>.</p>
-        </div>
-
-        <!-- Windows PowerShell Snippet -->
-        <div class="p-3.5 bg-[#0a0c10] border border-[#242b38] rounded-lg">
-          <div class="font-bold text-slate-200 mb-1.5 flex items-center justify-between">
-            <span>⚡ Windows PowerShell 1-Liner</span>
-            <button onclick="copyElementText('guide-powershell-cmd')" class="text-emerald-400 hover:underline font-normal text-[11px]">Copy Command</button>
-          </div>
-          <pre id="guide-powershell-cmd" class="font-mono text-[11px] text-slate-300 bg-[#12151c] p-2.5 rounded overflow-x-auto border border-[#242b38] whitespace-pre-wrap"></pre>
-        </div>
-
-        <!-- Apple & Android Files -->
-        <div class="grid grid-cols-2 gap-3">
-          <div class="p-3 bg-[#0a0c10] border border-[#242b38] rounded-lg text-center">
-            <div class="font-semibold text-slate-200 mb-1">🍏 macOS & iOS</div>
-            <p class="text-[11px] text-slate-400 mb-2">Double click to install profile.</p>
-            <a id="guide-link-apple" href="#" class="text-blue-400 hover:underline font-medium text-[11px]">Download .mobileconfig</a>
-          </div>
-
-          <div class="p-3 bg-[#0a0c10] border border-[#242b38] rounded-lg text-center">
-            <div class="font-semibold text-slate-200 mb-1">🤖 Android</div>
-            <p class="text-[11px] text-slate-400 mb-2">Import in strongSwan.</p>
-            <a id="guide-link-android" href="#" class="text-blue-400 hover:underline font-medium text-[11px]">Download .sswan</a>
-          </div>
-        </div>
-      </div>
-
-      <div class="mt-5 pt-3 border-t border-[#242b38] text-right">
-        <button onclick="closeModal('modal-guide')" class="btn-secondary text-xs">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Modal: Raw Telemetry Diagnostics -->
-  <div id="modal-diag" class="modal-backdrop">
-    <div class="modal-content p-6 max-w-2xl">
-      <div class="flex items-center justify-between pb-4 border-b border-[#242b38] mb-3">
-        <h3 class="text-sm font-bold text-white uppercase tracking-wider">IPsec Daemon Live Diagnostics</h3>
-        <button onclick="closeModal('modal-diag')" class="text-slate-400 hover:text-white">&times;</button>
-      </div>
-      <pre id="diag-raw-output" class="font-mono text-[11px] text-emerald-400 bg-[#0a0c10] p-4 rounded-lg border border-[#242b38] max-h-96 overflow-y-auto whitespace-pre-wrap"></pre>
-      <div class="mt-4 text-right">
-        <button onclick="closeModal('modal-diag')" class="btn-secondary text-xs">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Modal: WireGuard & Shadowsocks Configs -->
-  <div id="modal-extra-configs" class="modal-backdrop">
-    <div class="modal-content p-6 max-w-xl">
-      <div class="flex items-center justify-between pb-4 border-b border-[#242b38] mb-4">
-        <div class="flex items-center gap-2">
-          <h3 class="text-sm font-bold text-white uppercase tracking-wider">WG & SS Configs:</h3>
-          <span id="extra-username" class="text-xs font-mono px-2 py-0.5 bg-blue-500/10 text-blue-400 border border-blue-500/20 rounded"></span>
-        </div>
-        <button onclick="closeModal('modal-extra-configs')" class="text-slate-400 hover:text-white">&times;</button>
-      </div>
-
-      <div class="space-y-5 text-xs">
-        <!-- WireGuard -->
-        <div class="p-3.5 bg-[#0a0c10] border border-[#242b38] rounded-lg flex flex-col md:flex-row gap-4">
-          <div class="flex-1">
-            <div class="font-bold text-blue-400 mb-1.5 flex items-center justify-between">
-              <span>🔵 WireGuard Config</span>
-              <button onclick="copyElementText('wg-config-text')" class="text-emerald-400 hover:underline font-normal text-[11px]">Copy Text</button>
-            </div>
-            <pre id="wg-config-text" class="font-mono text-[10px] text-slate-300 bg-[#12151c] p-2 rounded overflow-x-auto border border-[#242b38] whitespace-pre-wrap h-full"></pre>
-          </div>
-          <div class="flex flex-col items-center justify-center shrink-0">
-            <div id="wg-qrcode" class="p-2 bg-white rounded-md"></div>
-            <span class="text-[10px] text-slate-500 mt-1">Scan from WG App</span>
-          </div>
-        </div>
-
-        <!-- Shadowsocks (Xray) -->
-        <div class="p-3.5 bg-[#0a0c10] border border-[#242b38] rounded-lg flex flex-col md:flex-row gap-4">
-          <div class="flex-1 flex flex-col justify-center">
-            <div class="font-bold text-purple-400 mb-1.5 flex items-center justify-between">
-              <span>🟣 Shadowsocks (Xray)</span>
-              <button onclick="copyElementText('ss-config-text')" class="text-emerald-400 hover:underline font-normal text-[11px]">Copy URI</button>
-            </div>
-            <pre id="ss-config-text" class="font-mono text-[10px] text-slate-300 bg-[#12151c] p-2 rounded overflow-x-auto border border-[#242b38] whitespace-pre-wrap break-all"></pre>
-          </div>
-          <div class="flex flex-col items-center justify-center shrink-0">
-            <div id="ss-qrcode" class="p-2 bg-white rounded-md"></div>
-            <span class="text-[10px] text-slate-500 mt-1">Scan from v2rayNG / SS</span>
-          </div>
-        </div>
-      </div>
-
-      <div class="mt-5 pt-3 border-t border-[#242b38] text-right">
-        <button onclick="closeModal('modal-extra-configs')" class="btn-secondary text-xs">Close</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Modal: Import Backup -->
-  <div id="modal-import" class="modal-backdrop">
-    <div class="modal-content p-6 max-w-md">
-      <div class="flex items-center justify-between pb-4 border-b border-[#242b38] mb-4">
-        <h3 class="text-sm font-bold text-white uppercase tracking-wider">📥 Import VPN Backup</h3>
-        <button onclick="closeModal('modal-import')" class="text-slate-400 hover:text-white">&times;</button>
-      </div>
-
-      <div class="bg-rose-500/10 border border-rose-500/20 rounded-lg p-3 mb-4">
-        <p class="text-xs text-rose-300 font-semibold mb-1">⚠️ Warning: This will overwrite current state</p>
-        <p class="text-[11px] text-slate-400">Importing a backup replaces all certificates, user accounts, and credentials. The VPN server will restart automatically after import.</p>
-      </div>
-
-      <div class="space-y-4">
-        <div>
-          <label class="block text-xs font-semibold text-slate-400 mb-1.5">Select Backup Archive (.tar.gz)</label>
-          <input type="file" id="import-file" accept=".tar.gz,.gz,.tgz"
-                 class="w-full px-3 py-2 bg-[#0a0c10] border border-[#242b38] rounded-md text-xs text-slate-200 file:mr-3 file:py-1 file:px-3 file:rounded file:border-0 file:text-xs file:font-semibold file:bg-blue-500/20 file:text-blue-400 hover:file:bg-blue-500/30 file:cursor-pointer focus:outline-none">
-          <p class="text-[11px] text-slate-500 mt-1">Upload a <code class="text-slate-400">vpn_backup_*.tar.gz</code> file exported from a VPN Control Panel.</p>
-        </div>
-
-        <div id="import-progress" class="hidden">
-          <div class="flex items-center gap-2 text-xs text-blue-400">
-            <svg class="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-            <span>Importing and restoring backup...</span>
-          </div>
-        </div>
-
-        <div class="pt-2 flex items-center justify-end gap-2">
-          <button type="button" onclick="closeModal('modal-import')" class="btn-secondary text-xs">Cancel</button>
-          <button type="button" onclick="importBackup()" id="btn-import-submit" class="btn-primary text-xs">
-            <span>Import & Restore</span>
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Toast Notification Container -->
-  <div id="toast-container" class="fixed bottom-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
-
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <div id="toast-container" class="toast-region" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="/vendor/qrcode/qrcode.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

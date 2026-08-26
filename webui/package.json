@@ -1,17 +1,23 @@
 {
-  "name": "OmniVPN-webui",
-  "version": "1.0.0",
+  "name": "omnivpn-webui",
+  "version": "2.0.0",
   "description": "Custom Management Dashboard and DNS Activity Logger for IPsec / IKEv2 VPN Server",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.js",
+    "check:syntax": "for file in *.js public/*.js test/*.js; do node --check \"$file\"; done",
+    "check": "npm run check:syntax && node --test test/*.test.js",
+    "audit:prod": "npm audit --omit=dev"
   },
   "dependencies": {
-    "archiver": "^7.0.1",
-    "cookie-parser": "^1.4.6",
+    "archiver": "8.0.0",
+    "cookie-parser": "1.4.7",
     "dns2": "^2.1.0",
-    "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1",
-    "sqlite3": "^5.1.7"
+    "express": "5.2.1",
+    "multer": "2.2.0",
+    "qrcodejs": "1.0.0",
+    "sqlite3": "6.0.1",
+    "tar": "7.5.22"
   }
 }

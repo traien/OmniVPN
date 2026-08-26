@@ -1,4 +1,6 @@
 const fs = require('fs');
+const path = require('path');
+const { PROC_ROOT } = require('./system-metrics');
 
 let prevRx = 0;
 let prevTx = 0;
@@ -24,7 +26,7 @@ function formatSpeed(bytesPerSec) {
 
 function readNetworkBytes() {
   try {
-    const data = fs.readFileSync('/proc/net/dev', 'utf8');
+    const data = fs.readFileSync(path.join(PROC_ROOT, 'net/dev'), 'utf8');
     const lines = data.split('\n');
     let totalRx = 0;
     let totalTx = 0;

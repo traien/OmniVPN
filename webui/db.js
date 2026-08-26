@@ -8,6 +8,7 @@ if (!fs.existsSync(DATA_DIR)) {
 }
 
 const DB_PATH = path.join(DATA_DIR, 'vpn_activity.db');
+const RETENTION_DAYS = Math.min(365, Math.max(1, Number.parseInt(process.env.DNS_LOG_RETENTION_DAYS || '30', 10)));
 const db = new sqlite3.Database(DB_PATH);
 
 // Initialize Tables & Indexes
@@ -225,7 +226,7 @@ function loadAllClientSettings() {
 }
 
 // Initialize cache on startup
-loadAllClientSettings();
+loadAllClientSettings().catch((err) => console.error('[Database] Failed to load client settings:', err.message));
 
 function setClientAdblock(username, enabled) {
   return new Promise((resolve, reject) => {
@@ -274,7 +275,8 @@ function pruneOldLogs(days = 30) {
   });
 }
 
-setInterval(() => pruneOldLogs(30), 24 * 60 * 60 * 1000);
+pruneOldLogs(RETENTION_DAYS);
+setInterval(() => pruneOldLogs(RETENTION_DAYS), 24 * 60 * 60 * 1000).unref();
 
 module.exports = {
   logQuery,

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const MAX_BLOCKLIST_BYTES = 20 * 1024 * 1024;
 
 // Curated initial blocklist (popular ad/malware/tracker domains)
 const DEFAULT_BLOCKED_DOMAINS = [
@@ -51,19 +52,31 @@ class AdBlockEngine {
     this.isReady = true;
 
     // Refresh blocklist every 7 days
-    setInterval(() => this.fetchRemoteBlocklist(), 7 * 24 * 60 * 60 * 1000);
+    setInterval(() => this.fetchRemoteBlocklist(), 7 * 24 * 60 * 60 * 1000).unref();
   }
 
   fetchRemoteBlocklist() {
     const listUrl = 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts';
-    https.get(listUrl, (res) => {
+    const request = https.get(listUrl, (res) => {
       if (res.statusCode !== 200) {
+        res.resume();
         return console.warn(`[AdBlock] Remote list returned HTTP ${res.statusCode}`);
       }
 
       let data = '';
-      res.on('data', (chunk) => { data += chunk; });
+      let downloadedBytes = 0;
+      let rejected = false;
+      res.on('data', (chunk) => {
+        downloadedBytes += chunk.length;
+        if (downloadedBytes > MAX_BLOCKLIST_BYTES) {
+          rejected = true;
+          res.destroy(new Error('Remote blocklist exceeded the 20 MB limit.'));
+          return;
+        }
+        data += chunk;
+      });
       res.on('end', () => {
+        if (rejected) return;
         try {
           const lines = data.split('\n');
           let count = 0;
@@ -87,14 +100,19 @@ class AdBlockEngine {
             this.blockedDomains = newSet;
             const dataDir = path.join(__dirname, 'data');
             if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
-            fs.writeFileSync(this.cacheFile, Array.from(this.blockedDomains).join('\n'));
+            const tmpFile = `${this.cacheFile}.${process.pid}.tmp`;
+            fs.writeFileSync(tmpFile, Array.from(this.blockedDomains).join('\n'), { mode: 0o600 });
+            fs.renameSync(tmpFile, this.cacheFile);
+            fs.chmodSync(this.cacheFile, 0o600);
             console.log(`[AdBlock] Successfully updated blocklist with ${this.blockedDomains.size} domains.`);
           }
         } catch (e) {
           console.error('[AdBlock] Parsing error:', e.message);
         }
       });
-    }).on('error', (err) => {
+    });
+    request.setTimeout(15_000, () => request.destroy(new Error('Remote blocklist request timed out.')));
+    request.on('error', (err) => {
       console.warn('[AdBlock] Could not fetch remote list (using local defaults):', err.message);
     });
   }

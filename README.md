@@ -1,104 +1,66 @@
-# OmniVPN: 1-Click Quad-Protocol VPN Infrastructure
+# OmniVPN
 
+OmniVPN is a self-hosted, four-protocol VPN stack with a private operations dashboard. Docker Compose runs IKEv2/L2TP, WireGuard, Shadowsocks/Xray, the DNS policy service, and the WebUI as one deployment.
 
+## What it provides
 
-A fully automated, reproducible Infrastructure-as-Code (IaC) management repository for your personal VPN server. 
+- IKEv2, L2TP/IPsec, WireGuard, and Shadowsocks client provisioning
+- Live tunnel presence, host throughput, and gateway diagnostics
+- Per-client DNS ad blocking, with browsing-history collection disabled by default
+- Platform connection kits and local QR-code generation
+- Authenticated, AES-256-GCM encrypted migration backups
+- Rate-limited administration, strict browser security policy, bounded uploads, and CI security gates
 
-OmniVPN allows you to provision, configure, and maintain your entire VPS—including security hardening, Docker engine, and a **Quad-Protocol VPN Stack**—with **a single click**.
+## Requirements
 
----
+- A Linux VPS with Docker Engine and Compose v2
+- UDP ports `500`, `4500`, and `51820`; TCP/UDP `8388`
+- An HTTPS reverse proxy or private SSH/Tailscale tunnel for the dashboard
 
-## 🌟 Key Features
+The dashboard binds to `127.0.0.1:8080` by default. Do not expose it directly over plain HTTP.
 
-- **Quad-Protocol VPN Stack**: Unbeatable bypass and compatibility with simultaneous support for:
-  - **WireGuard**: Modern, high-speed, UDP-based VPN for fast roaming on mobile devices.
-  - **Shadowsocks (via Xray)**: Superior censorship circumvention and deep packet inspection evasion.
-  - **IKEv2**: Perfect for native Windows, iOS, and macOS integration (no app needed).
-  - **L2TP/IPsec**: Legacy fallback compatibility.
-- **Custom Web Management Dashboard (`:8080`)**: Responsive, dark-themed control plane to create users, monitor active connections, and download client configurations or scan QR codes in 1 click.
-- **1-Click Reproducible Provisioning**: From a fresh Debian/Ubuntu install to a fully secured, production-ready server in minutes.
-- **Automated Security Hardening**:
-  - UFW Firewall configured with strict inbound rules.
-  - Fail2Ban enabled for brute-force SSH defense.
-  - Ed25519 SSH key authentication.
-  - Optimized Linux kernel networking and IP forwarding.
-- **Docker-Powered**: VPN server, WireGuard, Xray, and WebUI run in isolated containers with auto-restart policies.
-- **Zero Global Host Dependencies**: Pure Bash and standard macOS/Linux utilities.
-
----
-
-## 🖥️ VPN Control Panel (Web Dashboard)
-
-Access your live VPN control plane directly in your browser by visiting `http://<YOUR_VPS_IP>:8080`.
-
-### Dashboard Capabilities:
-- **🛡️ Per-Client Ad & Malware Blocking**: Toggle DNS-level ad, malware, and tracker blocking per client with over 95,000 unified rules.
-- **📊 Real-Time Bandwidth Gauges**: Live inbound and outbound throughput chart (Mbps / KB/s) with a 60-second telemetry buffer.
-- **🌍 GeoIP Client Telemetry**: Real-time country flag emoji (e.g. 🇩🇪, 🇺🇸, 🇫🇮) attached to every connected device.
-- **Live Browsing Activity**: Real-time stream of websites visited by connected clients with timestamps.
-- **1-Click User Provisioning**: Create new clients instantly with automatic credentials sync across all 4 protocols.
-- **1-Click Download Center**: Scan QR codes for WireGuard & Shadowsocks, or download `.zip` profiles for IKEv2.
-- **Server Migration & Backups**: 1-click "Export" to download a `.tar.gz` containing all certificates, credentials, SQLite logs, and configurations.
-
----
-
-## 🚀 Quickstart
-OmniVPN is entirely Dockerized and can be deployed anywhere.
-
-### 1. Configure Credentials
-Clone the repository and create your `.env` configuration file:
+## Deploy
 
 ```bash
-git clone https://github.com/traien/OmniVPN.git
-cd OmniVPN
-
-cat << EOF > .env
-VPN_PUBLIC_IP="<YOUR_VPS_IP>"
-VPN_IPSEC_PSK="MySecretPSK123"
-VPN_USER="admin"
-VPN_PASSWORD="MyVPNPassword123"
-WEBUI_PASSWORD="admin"
-WEBUI_PORT=8080
-EOF
+cp .env.example .env
+# Replace every placeholder with an independently generated secret.
+docker compose config
+docker compose up -d --build
+docker compose ps
 ```
 
-### 2. Deploy using Docker Compose
+Use at least 24 random characters for VPN credentials and at least 32 for `BACKUP_PASSPHRASE`. Keep `WEBUI_SECURE_COOKIE=true` behind HTTPS. Set `WEBUI_TRUST_PROXY=true` only when exactly one trusted reverse proxy fronts the dashboard. For an intentional HTTP-only local development session, set the secure-cookie setting to `false`.
+
+Open the dashboard through your HTTPS proxy. Use `docker compose logs -f vpn-webui` for startup diagnostics.
+
+## Privacy controls
+
+DNS history and external GeoIP lookup are opt-in:
+
+```dotenv
+DNS_LOGGING_ENABLED=false
+DNS_LOG_RETENTION_DAYS=30
+GEOIP_ENABLED=false
+```
+
+Ad blocking still works when DNS history is disabled. WireGuard profiles use the internal DNS policy service at `172.20.0.3`.
+
+## Development
+
 ```bash
-docker compose up -d
+cd webui
+npm ci
+npm run check
+npm audit --omit=dev
+docker build -t omnivpn-webui:test .
 ```
-*Note: You must ensure your host firewall allows UDP 500/4500 (IPsec), UDP 51820 (WireGuard), and TCP/UDP 8388 (Shadowsocks).*
 
----
+The CI workflow runs these checks before publishing `ghcr.io/traien/omnivpn-webui`.
 
-## 📱 Client Connection Guide
+## Backups
 
-### Option 1: WireGuard (Recommended for Mobile)
-1. Open the **WebUI** and create a user.
-2. Click the **⚙️ (Gear Icon)** next to the user.
-3. Open the **WireGuard** app on your phone, tap `+`, and scan the **QR Code**.
+Exports use the `.ovpnbackup` format and are encrypted with `BACKUP_PASSPHRASE`. Restore validates authentication, allowed paths, entry types, file count, and expanded size before touching active configuration. Store the passphrase separately from the backup.
 
-### Option 2: Shadowsocks / Xray (Best for Anti-Censorship)
-1. Open the **WebUI** and click the **⚙️ (Gear Icon)** next to your user.
-2. **Android/iOS:** Use **v2rayNG** (Android) or **Shadowrocket/V2Ray Tun** (iOS) and scan the **QR Code**.
-3. **PC/Mac:** Click **Copy URI** (`ss://...`) and paste it into **v2rayN** (Windows) or **V2RayU** (Mac).
+## Security
 
-### Option 3: Windows 10 & 11 via IKEv2 (Native — No App Needed)
-1. In the WebUI, click the download icon next to your user.
-2. Unzip the downloaded file on your Windows PC.
-3. Right-click on `install_windows_ikev2.bat` $\rightarrow$ **Run as administrator**.
-4. Click on your Windows Network icon in the taskbar $\rightarrow$ Select **My IKEv2 VPN** $\rightarrow$ Click **Connect**.
-
-### Option 4: macOS & iOS (IKEv2 via Profile)
-1. In the WebUI, click the Apple download icon.
-2. Transfer the `.mobileconfig` file via AirDrop to your Apple device.
-3. Double click / tap the profile to install $\rightarrow$ toggle **Connect**.
-
----
-
-## 🔒 Security Notes
-- The `.env` file containing your master passwords is automatically ignored by `.gitignore`.
-- Ensure you do not accidentally expose your `.env` file if you fork this repository.
-
-## 🔮 Future Roadmap
-- **📱 Instant Telegram Alerts**: Real-time notifications via Telegram Bot when devices connect/disconnect, admin logs in, or new certificates are created.
-- **💾 Automated Encrypted Offsite Backups to Telegram**: Scheduled AES-256 encrypted backups of certificates, credentials, and SQLite logs sent directly to your Telegram chat.
+Generated client profiles and private-key formats are ignored by Git. Never commit `.env`, `profiles/`, certificates, runtime databases, or backup archives. Review [SECURITY.md](SECURITY.md) before operating an internet-facing deployment.

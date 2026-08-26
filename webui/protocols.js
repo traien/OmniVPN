@@ -1,23 +1,24 @@
 const fs = require('fs');
-const { execSync } = require('child_process');
 const crypto = require('crypto');
+const path = require('path');
+const { restartContainer, runFileSync } = require('./command');
 
 const USERS_DB = '/app/data/users.json';
-const WG_CONF = '/etc/wireguard/wg0.conf';
+const WG_CONF = '/etc/wireguard/wg_confs/wg0.conf';
 const XRAY_CONF = '/etc/xray/config.json';
 const SERVER_IP = process.env.VPN_PUBLIC_IP || '127.0.0.1';
 
 function initProtocols() {
   if (!fs.existsSync('/app/data')) fs.mkdirSync('/app/data', { recursive: true });
-  if (!fs.existsSync('/etc/wireguard')) fs.mkdirSync('/etc/wireguard', { recursive: true });
+  if (!fs.existsSync(path.dirname(WG_CONF))) fs.mkdirSync(path.dirname(WG_CONF), { recursive: true });
   if (!fs.existsSync('/etc/xray')) fs.mkdirSync('/etc/xray', { recursive: true });
 
   // Init WG
   if (!fs.existsSync(WG_CONF) || !fs.readFileSync(WG_CONF, 'utf8').includes('PrivateKey')) {
     try {
-      const priv = execSync('wg genkey').toString().trim();
+      const priv = runFileSync('wg', ['genkey']).trim();
       const conf = `[Interface]\nAddress = 10.8.0.1\nListenPort = 51820\nPrivateKey = ${priv}\n`;
-      fs.writeFileSync(WG_CONF, conf);
+      writeSecretFile(WG_CONF, conf);
     } catch(e) { console.error("WG genkey failed", e); }
   }
 
@@ -50,7 +51,7 @@ function initProtocols() {
       }],
       outbounds: [{ protocol: "freedom" }]
     };
-    fs.writeFileSync(XRAY_CONF, JSON.stringify(conf, null, 2));
+    writeSecretFile(XRAY_CONF, JSON.stringify(conf, null, 2));
   }
 }
 
@@ -62,15 +63,22 @@ function getDb() {
 }
 
 function saveDb(db) {
-  fs.writeFileSync(USERS_DB, JSON.stringify(db, null, 2));
+  writeSecretFile(USERS_DB, JSON.stringify(db, null, 2));
   syncWg(db);
   syncXray(db);
 }
 
+function writeSecretFile(filePath, content) {
+  const tmpPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpPath, content, { mode: 0o600 });
+  fs.renameSync(tmpPath, filePath);
+  fs.chmodSync(filePath, 0o600);
+}
+
 function generateWgKeys() {
-  const priv = execSync('wg genkey').toString().trim();
-  const pub = execSync(`echo "${priv}" | wg pubkey`).toString().trim();
-  const psk = execSync('wg genpsk').toString().trim();
+  const priv = runFileSync('wg', ['genkey']).trim();
+  const pub = runFileSync('wg', ['pubkey'], { input: `${priv}\n` }).trim();
+  const psk = runFileSync('wg', ['genpsk']).trim();
   return { priv, pub, psk };
 }
 
@@ -88,10 +96,10 @@ function syncWg(db) {
       newConf += `AllowedIPs = 10.8.0.${u.wgIp}/32\n\n`;
     }
   }
-  fs.writeFileSync(WG_CONF, newConf);
-  try {
-    execSync('docker restart wireguard');
-  } catch(e) { console.error('Failed to restart wireguard', e.message); }
+  writeSecretFile(WG_CONF, newConf);
+  restartContainer('wireguard').then((result) => {
+    if (!result.success) console.error('Failed to restart wireguard:', result.error);
+  });
 }
 
 function syncXray(db) {
@@ -106,10 +114,10 @@ function syncXray(db) {
   if (conf.inbounds && conf.inbounds[0] && conf.inbounds[0].settings) {
     conf.inbounds[0].settings.clients = clients;
   }
-  fs.writeFileSync(XRAY_CONF, JSON.stringify(conf, null, 2));
-  try {
-    execSync('docker restart xray');
-  } catch(e) { console.error('Failed to restart xray', e.message); }
+  writeSecretFile(XRAY_CONF, JSON.stringify(conf, null, 2));
+  restartContainer('xray').then((result) => {
+    if (!result.success) console.error('Failed to restart xray:', result.error);
+  });
 }
 
 function addUserProtocols(name) {
@@ -122,9 +130,11 @@ function addUserProtocols(name) {
     u.wgPriv = keys.priv;
     u.wgPub = keys.pub;
     u.wgPsk = keys.psk;
-    db.lastWgIp++;
-    if(db.lastWgIp > 254) db.lastWgIp = 2; // naive wrap
-    u.wgIp = db.lastWgIp;
+    const used = new Set(Object.values(db.users).map((user) => Number(user.wgIp)).filter(Boolean));
+    const nextIp = Array.from({ length: 253 }, (_, index) => index + 2).find((candidate) => !used.has(candidate));
+    if (!nextIp) throw new Error('WireGuard address pool is exhausted.');
+    u.wgIp = nextIp;
+    db.lastWgIp = nextIp;
   }
   if (!u.xrayPass) {
     u.xrayPass = crypto.randomBytes(16).toString('hex');
@@ -147,7 +157,7 @@ function getServerWgPub() {
   const conf = fs.readFileSync(WG_CONF, 'utf8');
   const m = conf.match(/PrivateKey\s*=\s*(.*)/);
   if (m && m[1]) {
-    return execSync(`echo "${m[1].trim()}" | wg pubkey`).toString().trim();
+    return runFileSync('wg', ['pubkey'], { input: `${m[1].trim()}\n` }).trim();
   }
   return '';
 }
