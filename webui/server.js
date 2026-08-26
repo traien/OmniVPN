@@ -90,7 +90,13 @@ async function getConnectedDevices() {
 
         if (remoteIpMatch) {
           const remoteIp = remoteIpMatch[1];
-          const username = idMatch ? idMatch[1] : (connNameMatch ? connNameMatch[1] : 'Unknown');
+          let username = idMatch ? idMatch[1] : (connNameMatch ? connNameMatch[1] : 'Unknown');
+          
+          if (username.startsWith('CN=')) {
+            const cnMatch = username.match(/CN=([^,]+)/);
+            if (cnMatch) username = cnMatch[1];
+          }
+
           const virtualIp = leaseMatch ? leaseMatch[1] : 'Assigned';
           const inBytes = inBytesMatch ? parseInt(inBytesMatch[1], 10) : 0;
           const outBytes = outBytesMatch ? parseInt(outBytesMatch[1], 10) : 0;
