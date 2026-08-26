@@ -508,8 +508,8 @@ app.delete('/api/users/:username', authMiddleware, async (req, res) => {
   }
 
   try {
-    // 1. Delete IKEv2 client (non-interactive)
-    await runDockerExec(`bash -c 'echo y | ikev2.sh --deleteclient "${username}" || true'`);
+    // 1. Revoke IKEv2 client (non-interactive)
+    await runDockerExec(`bash -c 'echo y | ikev2.sh --revokeclient "${username}" || true'`);
 
     // 2. Remove L2TP credentials
     await runDockerExec(`bash -c "
@@ -585,13 +585,16 @@ echo ========================================================
 echo   Setting up IKEv2 VPN: My IKEv2 VPN (${username})
 echo ========================================================
 
-echo [1/3] Importing ${username}.p12 certificate into Machine Store...
+echo [1/4] Cleaning up old VPN certificates for ${username}...
+powershell -Command "Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { \$_.Subject -match 'CN=${username}' } | Remove-Item -Force -ErrorAction SilentlyContinue"
+
+echo [2/4] Importing ${username}.p12 certificate into Machine Store...
 certutil -f -p "" -importpfx "%~dp0${username}.p12" NoExport
 
-echo [2/3] Configuring Windows IPsec registry parameters...
+echo [3/4] Configuring Windows IPsec registry parameters...
 REG ADD HKLM\\SYSTEM\\CurrentControlSet\\Services\\RasMan\\Parameters /v NegotiateDH2048_AES256 /t REG_DWORD /d 0x1 /f
 
-echo [3/3] Creating Windows IKEv2 VPN profile...
+echo [4/4] Creating Windows IKEv2 VPN profile...
 powershell -Command "Remove-VpnConnection -Name 'My IKEv2 VPN' -Force -ErrorAction SilentlyContinue; Add-VpnConnection -ServerAddress '${SERVER_IP}' -Name 'My IKEv2 VPN' -TunnelType IKEv2 -AuthenticationMethod MachineCertificate -EncryptionLevel Required -PassThru; Set-VpnConnectionIPsecConfiguration -ConnectionName 'My IKEv2 VPN' -AuthenticationTransformConstants GCMAES128 -CipherTransformConstants GCMAES128 -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -PfsGroup None -DHGroup Group14 -PassThru -Force"
 
 echo.
