@@ -86,6 +86,7 @@ async function getConnectedDevices() {
         const outBytesMatch = line.match(/outBytes=(\d+)/);
         const addTimeMatch = line.match(/add_time=(\d+)/);
         const connNameMatch = line.match(/"([^"]+)"/);
+        const stateMatch = line.match(/#(\d+):/);
 
         if (remoteIpMatch) {
           const remoteIp = remoteIpMatch[1];
@@ -94,6 +95,7 @@ async function getConnectedDevices() {
           const inBytes = inBytesMatch ? parseInt(inBytesMatch[1], 10) : 0;
           const outBytes = outBytesMatch ? parseInt(outBytesMatch[1], 10) : 0;
           const addTime = addTimeMatch ? parseInt(addTimeMatch[1], 10) : null;
+          const stateId = stateMatch ? stateMatch[1] : null;
           
           if (virtualIp && virtualIp !== 'Assigned') {
             updateClientIpMap(virtualIp, username);
@@ -116,6 +118,7 @@ async function getConnectedDevices() {
 
           devices.push({
             id: 'sa_' + (addTime || Math.random().toString(36).substring(7)),
+            stateId,
             username,
             remoteIp,
             virtualIp,
@@ -196,6 +199,27 @@ async function getConnectedDevices() {
   }
   return devices;
 }
+
+// -----------------------------------------------------------------------------
+// Disconnect Connection
+// -----------------------------------------------------------------------------
+app.post('/api/connections/kick', authMiddleware, async (req, res) => {
+  const { stateId } = req.body;
+  if (!stateId || !/^\d+$/.test(stateId)) {
+    return res.status(400).json({ error: 'Invalid connection state ID' });
+  }
+
+  try {
+    const result = await runDockerExec(`ipsec whack --deletestate ${stateId}`);
+    if (result.success) {
+      res.json({ success: true });
+    } else {
+      res.status(500).json({ error: 'Failed to disconnect client. They may have already disconnected.' });
+    }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // -----------------------------------------------------------------------------
 // Authentication Endpoints

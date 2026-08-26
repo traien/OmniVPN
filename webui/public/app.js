@@ -180,6 +180,27 @@ async function fetchDashboardData() {
   }
 }
 
+async function kickDevice(stateId) {
+  if (!confirm('Are you sure you want to forcibly disconnect this client?')) return;
+  
+  try {
+    const res = await fetch('/api/connections/kick', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stateId })
+    });
+    
+    const data = await res.json();
+    if (data.error) {
+      alert(data.error);
+    } else {
+      fetchDashboardData();
+    }
+  } catch (err) {
+    alert('Network error disconnecting client');
+  }
+}
+
 function renderHeaderStats(data) {
   document.getElementById('stat-ip').textContent = data.serverIp;
   document.getElementById('stat-tunnels').textContent = data.activeConnections;
@@ -291,7 +312,13 @@ function renderConnectedDevices(devices) {
         <td class="py-3 text-slate-300 font-mono text-[11px]">↓ ${device.inBytesFormatted} / ↑ ${device.outBytesFormatted}</td>
         <td class="py-3 text-slate-400 font-mono text-[11px]">${device.duration}</td>
         <td class="py-3 text-right">
-          <span class="text-[11px] font-bold text-emerald-400">CONNECTED</span>
+          ${device.stateId ? `
+            <button onclick="kickDevice('${device.stateId}')" class="btn btn-danger py-1 px-2 text-[10px] flex items-center justify-end w-full" title="Disconnect Client">
+              <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"></path></svg> KICK
+            </button>
+          ` : `
+            <span class="text-[11px] font-bold text-emerald-400">CONNECTED</span>
+          `}
         </td>
       </tr>
     `;
