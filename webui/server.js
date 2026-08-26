@@ -586,7 +586,7 @@ echo   Setting up IKEv2 VPN: My IKEv2 VPN (${username})
 echo ========================================================
 
 echo [1/4] Cleaning up old VPN certificates for ${username}...
-powershell -Command "Get-ChildItem -Path Cert:\LocalMachine\My | Where-Object { \$_.Subject -match 'CN=${username}' } | Remove-Item -Force -ErrorAction SilentlyContinue"
+powershell -Command "Get-ChildItem -Path Cert:\\LocalMachine\\My | Where-Object { $_.Subject -match 'CN=${username}' } | Remove-Item -Force -ErrorAction SilentlyContinue"
 
 echo [2/4] Importing ${username}.p12 certificate into Machine Store...
 certutil -f -p "" -importpfx "%~dp0${username}.p12" NoExport
