@@ -255,6 +255,16 @@ function clearLogs() {
   });
 }
 
+function removeClientAdblock(username) {
+  return new Promise((resolve, reject) => {
+    db.run(`DELETE FROM client_settings WHERE username = ?`, [username], function(err) {
+      if (err) return reject(err);
+      adblockCache.delete(username);
+      resolve(this.changes);
+    });
+  });
+}
+
 function pruneOldLogs(days = 30) {
   const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
   db.run(`DELETE FROM dns_logs WHERE timestamp < ?`, [cutoff], function(err) {
@@ -274,5 +284,6 @@ module.exports = {
   clearLogs,
   isClientAdblockEnabled,
   setClientAdblock,
-  loadAllClientSettings
+  loadAllClientSettings,
+  removeClientAdblock
 };
