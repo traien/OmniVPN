@@ -532,6 +532,16 @@ app.delete('/api/users/:username', authMiddleware, async (req, res) => {
   }
 
   try {
+    // 0. Force disconnect any active sessions for this user
+    try {
+      const devices = await getConnectedDevices();
+      for (const dev of devices) {
+        if (dev.username === username && dev.stateId) {
+          await runDockerExec(`ipsec whack --deletestate ${dev.stateId}`);
+        }
+      }
+    } catch(e) {}
+
     // 1. Revoke IKEv2 client (non-interactive)
     await runDockerExec(`bash -c 'echo y | ikev2.sh --revokeclient "${username}" || true'`);
 
