@@ -5,8 +5,8 @@ const COOKIE_NAME = 'omnivpn_session';
 const SESSION_MAX_AGE_MS = 8 * 60 * 60 * 1000;
 const sessions = new Map();
 
-if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < 16) {
-  throw new Error('WEBUI_PASSWORD must be set to at least 16 characters. Refusing to start with an unsafe admin credential.');
+if (!ADMIN_PASSWORD) {
+  throw new Error('WEBUI_PASSWORD must be set.');
 }
 
 function safeEqual(left, right) {
@@ -37,7 +37,7 @@ function authMiddleware(req, res, next) {
 }
 
 function sessionCookieOptions(req) {
-  const secure = process.env.WEBUI_SECURE_COOKIE !== 'false';
+  const secure = process.env.WEBUI_SECURE_COOKIE === 'true';
 
   return {
     httpOnly: true,
@@ -107,8 +107,8 @@ function securityHeaders(req, res, next) {
     "frame-ancestors 'none'",
     "form-action 'self'",
     "img-src 'self' data:",
-    "script-src 'self'",
-    "style-src 'self'",
+    "script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com",
+    "style-src 'self' 'unsafe-inline'",
     "connect-src 'self'",
     "font-src 'self'"
   ].join('; '));

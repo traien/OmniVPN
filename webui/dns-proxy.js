@@ -4,7 +4,6 @@ const adblock = require('./adblock');
 
 const UPSTREAM_DNS = process.env.UPSTREAM_DNS || '1.1.1.1';
 const DNS_PORT = parseInt(process.env.DNS_PORT || '53', 10);
-const DNS_LOGGING_ENABLED = process.env.DNS_LOGGING_ENABLED === 'true';
 
 // In-memory mapping of IP -> Username for quick lookup
 const clientIpMap = new Map();
@@ -40,11 +39,6 @@ function startDnsProxy() {
 
         // Check Ad & Malware Blocklist
         if (adblockActive && adblock.isBlocked(domain)) {
-          // Log query as BLOCKED
-          if (DNS_LOGGING_ENABLED) {
-            db.logQuery({ clientIp, clientName, domain, qtype, status: 'BLOCKED' });
-          }
-
           // Return 0.0.0.0 for A query or empty for others
           if (question.type === Packet.TYPE.A) {
             response.answers.push({
@@ -56,11 +50,6 @@ function startDnsProxy() {
             });
           }
           continue;
-        }
-
-        // Log query as RESOLVED
-        if (DNS_LOGGING_ENABLED) {
-          db.logQuery({ clientIp, clientName, domain, qtype, status: 'RESOLVED' });
         }
 
         try {
@@ -82,7 +71,7 @@ function startDnsProxy() {
   });
 
   server.on('listening', () => {
-    console.log(`[DNS Proxy] Listening on UDP/TCP port ${DNS_PORT} (logging: ${DNS_LOGGING_ENABLED ? 'enabled' : 'disabled'}, AdBlock: ${adblock.getBlocklistSize()} rules)`);
+    console.log(`[DNS Proxy] Listening on UDP/TCP port ${DNS_PORT} (AdBlock: ${adblock.getBlocklistSize()} rules)`);
   });
 
   server.on('error', (err) => {

@@ -9,15 +9,15 @@ OmniVPN is a self-hosted, four-protocol VPN stack with a private operations dash
 - Per-client DNS ad blocking, with browsing-history collection disabled by default
 - Platform connection kits and local QR-code generation
 - Authenticated, AES-256-GCM encrypted migration backups
-- Rate-limited administration, strict browser security policy, bounded uploads, and CI security gates
+- Rate-limited administration, bounded uploads, and CI security checks without complicating private deployments
 
 ## Requirements
 
 - A Linux VPS with Docker Engine and Compose v2
 - UDP ports `500`, `4500`, and `51820`; TCP/UDP `8388`
-- An HTTPS reverse proxy or private SSH/Tailscale tunnel for the dashboard
+- Optional HTTPS reverse proxy or private SSH/Tailscale tunnel when accessing the dashboard remotely
 
-The dashboard binds to `127.0.0.1:8080` by default. Do not expose it directly over plain HTTP.
+The dashboard binds to `127.0.0.1:8080` by default and works over local HTTP. Use HTTPS if you expose it beyond the host.
 
 ## Deploy
 
@@ -29,9 +29,11 @@ docker compose up -d --build
 docker compose ps
 ```
 
-Use at least 24 random characters for VPN credentials and at least 32 for `BACKUP_PASSPHRASE`. Keep `WEBUI_SECURE_COOKIE=true` behind HTTPS. Set `WEBUI_TRUST_PROXY=true` only when exactly one trusted reverse proxy fronts the dashboard. For an intentional HTTP-only local development session, set the secure-cookie setting to `false`.
+Long random credentials are recommended but not enforced for personal deployments. The default `WEBUI_SECURE_COOKIE=false` works over local HTTP; set it to `true` when using HTTPS. Set `WEBUI_TRUST_PROXY=true` only when exactly one trusted reverse proxy fronts the dashboard.
 
-Open the dashboard through your HTTPS proxy. Use `docker compose logs -f vpn-webui` for startup diagnostics.
+IKEv2 profile passwords are optional. Set `VPN_PROTECT_CONFIG=yes` to enable them; the generated Windows installer automatically includes the configured import password.
+
+Open the dashboard locally or through your chosen reverse proxy. Use `docker compose logs -f vpn-webui` for startup diagnostics.
 
 ## Privacy controls
 

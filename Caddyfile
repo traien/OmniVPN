@@ -1,0 +1,8 @@
+{
+  email {$ACME_EMAIL:admin@example.com}
+}
+
+{$WEBUI_DOMAIN:localhost} {
+  encode zstd gzip
+  reverse_proxy vpn-webui:8080
+}

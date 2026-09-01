@@ -1,446 +1,763 @@
-'use strict';
+// ==============================================================================
+// VPN Control Panel: Client-side Application Controller
+// ==============================================================================
 
-const state = {
+let serverState = {
   activeTab: 'overview',
-  serverIp: '',
+  serverIp: '37.27.11.96',
+  psk: '',
+  pskVisible: false,
   users: [],
   devices: [],
   rawTelemetry: '',
-  logsPage: 0,
-  logsLimit: 50,
-  logsTotal: 0,
-  logsSearch: '',
-  logsClient: '',
-  logsStatus: '',
-  pollTimer: null,
-  pskTimer: null
+  bandwidth: { current: {}, history: [] }
 };
 
-const $ = (id) => document.getElementById(id);
-
-function node(tag, options = {}, children = []) {
-  const element = document.createElement(tag);
-  if (options.className) element.className = options.className;
-  if (options.text !== undefined) element.textContent = options.text;
-  if (options.attrs) {
-    for (const [name, value] of Object.entries(options.attrs)) {
-      if (value !== undefined && value !== null) element.setAttribute(name, String(value));
-    }
-  }
-  for (const child of Array.isArray(children) ? children : [children]) {
-    if (child) element.append(child);
-  }
-  return element;
-}
-
-async function fetchJson(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), options.timeout || 12_000);
-  try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
-    if (response.status === 401) {
-      showLogin();
-      throw new Error('Your session expired. Sign in again.');
-    }
-    const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || `Request failed with status ${response.status}.`);
-    return data;
-  } catch (error) {
-    if (error.name === 'AbortError') throw new Error('The gateway did not respond in time. Try again.');
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
+// -----------------------------------------------------------------------------
+// Initialization & Authentication
+// -----------------------------------------------------------------------------
 document.addEventListener('DOMContentLoaded', () => {
-  bindEvents();
   checkAuth();
+
+  document.getElementById('login-form').addEventListener('submit', handleLogin);
+  document.getElementById('form-add-user').addEventListener('submit', handleCreateUser);
+  document.getElementById('user-search').addEventListener('input', handleSearch);
+
 });
-
-function bindEvents() {
-  $('login-form').addEventListener('submit', handleLogin);
-  $('form-add-user').addEventListener('submit', handleCreateUser);
-  $('user-search').addEventListener('input', (event) => renderUsers(state.users.filter((user) => user.name.toLowerCase().includes(event.target.value.trim().toLowerCase()))));
-  $('log-filter-client').addEventListener('change', (event) => { state.logsClient = event.target.value; state.logsPage = 0; fetchLogs(); });
-  $('log-filter-status').addEventListener('change', (event) => { state.logsStatus = event.target.value; state.logsPage = 0; fetchLogs(); });
-  let searchTimer;
-  $('log-search').addEventListener('input', (event) => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => { state.logsSearch = event.target.value.trim(); state.logsPage = 0; fetchLogs(); }, 300);
-  });
-
-  document.addEventListener('click', handleClick);
-  document.addEventListener('change', handleChange);
-  document.addEventListener('keydown', handleKeyboard);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) stopPolling();
-    else if (!$('app-container').hidden) startPolling();
-  });
-}
-
-async function handleClick(event) {
-  const target = event.target.closest('button, a');
-  if (!target) return;
-  if (target.matches('[data-close-dialog]')) return target.closest('dialog')?.close();
-  if (target.dataset.tab) return switchTab(target.dataset.tab);
-  if (target.dataset.action === 'kick') return kickDevice(target.dataset.stateId);
-  if (target.dataset.action === 'delete') return deleteUser(target.dataset.username);
-  if (target.dataset.action === 'guide') return openGuide(target.dataset.username);
-  if (target.dataset.action === 'configs') return openConfigs(target.dataset.username);
-  if (target.dataset.domain) return filterByDomain(target.dataset.domain);
-  if (target.dataset.copy) return copyText(target.dataset.copy);
-
-  const actions = {
-    'action-export': exportBackup,
-    'action-import': () => openDialog('modal-import'),
-    'action-diagnostics': showDiagnostics,
-    'action-logout': logout,
-    'action-new-client': openCreateClient,
-    'action-first-client': openCreateClient,
-    'action-toggle-psk': togglePsk,
-    'action-export-logs': exportLogs,
-    'action-clear-logs': clearLogs,
-    'btn-prev-page': () => changeLogPage(-1),
-    'btn-next-page': () => changeLogPage(1),
-    'btn-import-submit': importBackup
-  };
-  if (actions[target.id]) actions[target.id]();
-}
-
-function handleChange(event) {
-  if (event.target.matches('[data-adblock-user]')) {
-    toggleAdblock(event.target.dataset.adblockUser, event.target.checked, event.target);
-  }
-}
-
-function handleKeyboard(event) {
-  const tab = event.target.closest('[role="tab"]');
-  if (!tab || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-  event.preventDefault();
-  const next = event.key === 'ArrowRight' ? 'logs' : 'overview';
-  switchTab(next);
-  $(`tab-${next}`).focus();
-}
 
 async function checkAuth() {
   try {
-    const data = await fetchJson('/api/auth/check');
-    if (data.authenticated) showApp();
-    else showLogin();
-  } catch (error) {
-    showLogin(error.message);
-  }
-}
+    const res = await fetch('/api/auth/check');
+    const data = await res.json();
+    if (data.authenticated) {
+      document.getElementById('login-screen').classList.add('hidden');
+      document.getElementById('app-container').classList.remove('hidden');
+      fetchDashboardData();
 
-async function handleLogin(event) {
-  event.preventDefault();
-  const error = $('login-error');
-  error.hidden = true;
-  const submit = event.submitter;
-  submit.disabled = true;
-  submit.textContent = 'Verifying…';
-  try {
-    await fetchJson('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: $('login-password').value }) });
-    $('login-password').value = '';
-    showApp();
+      // Real-time telemetry interval
+      setInterval(fetchDashboardData, 3000);
+    } else {
+      document.getElementById('login-screen').classList.remove('hidden');
+      document.getElementById('app-container').classList.add('hidden');
+    }
   } catch (err) {
-    error.textContent = err.message;
-    error.hidden = false;
-    $('login-password').focus();
-  } finally {
-    submit.disabled = false;
-    submit.textContent = 'Open command center';
+    showToast('Failed to check authentication status', 'error');
   }
 }
 
-function showLogin(message = '') {
-  stopPolling();
-  $('app-container').hidden = true;
-  $('login-screen').hidden = false;
-  if (message) { $('login-error').textContent = message; $('login-error').hidden = false; }
-}
+async function handleLogin(e) {
+  e.preventDefault();
+  const password = document.getElementById('login-password').value;
+  const errorEl = document.getElementById('login-error');
+  errorEl.classList.add('hidden');
 
-function showApp() {
-  $('login-screen').hidden = true;
-  $('app-container').hidden = false;
-  refreshDashboard();
-  startPolling();
-}
-
-function startPolling() {
-  stopPolling();
-  state.pollTimer = setInterval(refreshDashboard, 5_000);
-}
-
-function stopPolling() {
-  if (state.pollTimer) clearInterval(state.pollTimer);
-  state.pollTimer = null;
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    const data = await res.json();
+    if (data.success) {
+      checkAuth();
+    } else {
+      errorEl.textContent = data.error || 'Authentication failed';
+      errorEl.classList.remove('hidden');
+    }
+  } catch (err) {
+    errorEl.textContent = 'Server connection error';
+    errorEl.classList.remove('hidden');
+  }
 }
 
 async function logout() {
-  try { await fetchJson('/api/auth/logout', { method: 'POST' }); } catch {}
-  showLogin();
+  await fetch('/api/auth/logout', { method: 'POST' });
+  location.reload();
 }
 
-function switchTab(tab) {
-  state.activeTab = tab;
-  for (const name of ['overview', 'logs']) {
-    const active = name === tab;
-    $(`view-${name}`).hidden = !active;
-    $(`tab-${name}`).setAttribute('aria-selected', String(active));
-    $(`tab-${name}`).tabIndex = active ? 0 : -1;
-  }
-  if (tab === 'logs') fetchLogs();
-}
-
-async function refreshDashboard() {
+// -----------------------------------------------------------------------------
+// Data Fetching & Dashboard Rendering
+// -----------------------------------------------------------------------------
+async function fetchDashboardData() {
   try {
-    const [status, users] = await Promise.all([fetchJson('/api/status'), fetchJson('/api/users')]);
-    state.serverIp = status.serverIp;
-    state.rawTelemetry = status.ipsecDetails;
-    state.devices = status.devices || [];
-    state.users = users.users || [];
-    renderStatus(status);
-    renderBandwidth(status.bandwidth || { current: {}, history: [] });
-    renderDevices(state.devices);
-    renderUsers(state.users);
-    renderClientOptions(state.users);
+    const [statusRes, usersRes] = await Promise.all([
+      fetch('/api/status'),
+      fetch('/api/users')
+    ]);
+
+    if (statusRes.status === 401 || usersRes.status === 401) {
+      return checkAuth();
+    }
+
+    const statusData = await statusRes.json();
+    const usersData = await usersRes.json();
+
+    serverState.serverIp = statusData.serverIp;
+    serverState.psk = statusData.psk;
+    serverState.rawTelemetry = statusData.ipsecDetails;
+    serverState.devices = statusData.devices || [];
+    serverState.bandwidth = statusData.bandwidth || { current: {}, history: [] };
+    serverState.users = usersData.users || [];
+
+    renderHeaderStats(statusData);
+    renderBandwidthChart(serverState.bandwidth);
+    renderConnectedDevices(serverState.devices);
+    renderUsersList(serverState.users);
+  } catch (err) {
+    console.error('Fetch error:', err);
+  }
+}
+
+async function kickDevice(stateId) {
+  if (!confirm('Are you sure you want to forcibly disconnect this client?')) return;
+
+  try {
+    const res = await fetch('/api/connections/kick', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stateId })
+    });
+
+    const data = await res.json();
+    if (data.error) {
+      alert(data.error);
+    } else {
+      showToast('Client disconnected.', 'success');
+      await fetchDashboardData();
+    }
+  } catch (err) {
+    alert('Network error disconnecting client');
+  }
+}
+
+function renderHeaderStats(data) {
+  document.getElementById('stat-ip').textContent = data.serverIp;
+  document.getElementById('stat-tunnels').textContent = data.activeConnections;
+
+  // Format uptime
+  const uptimeMins = Math.floor(data.uptimeSeconds / 60);
+  const uptimeHours = Math.floor(uptimeMins / 60);
+  const uptimeDays = Math.floor(uptimeHours / 24);
+  let uptimeStr = `${uptimeMins}m`;
+  if (uptimeHours > 0) uptimeStr = `${uptimeHours % 24}h ${uptimeMins % 60}m`;
+  if (uptimeDays > 0) uptimeStr = `${uptimeDays}d ${uptimeHours % 24}h`;
+
+  document.getElementById('stat-uptime').textContent = uptimeStr;
+  document.getElementById('card-ip').textContent = data.serverIp;
+  document.getElementById('card-tunnels').textContent = `${data.activeConnections} Active`;
+  document.getElementById('card-load').textContent = `${data.loadAverage} / ${data.memoryUsagePercent}%`;
+
+  if (serverState.pskVisible) {
+    document.getElementById('card-psk').textContent = data.psk;
+  }
+}
+
+function togglePSK() {
+  serverState.pskVisible = !serverState.pskVisible;
+  const pskEl = document.getElementById('card-psk');
+  pskEl.textContent = serverState.pskVisible ? serverState.psk : '••••••••••••';
+}
+
+// -----------------------------------------------------------------------------
+// Live Bandwidth SVG Chart Renderer
+// -----------------------------------------------------------------------------
+function renderBandwidthChart(bw) {
+  const current = bw.current || {};
+  const history = bw.history || [];
+
+  document.getElementById('bw-rx-current').textContent = current.rxFormatted || '0.0 Mbps';
+  document.getElementById('bw-tx-current').textContent = current.txFormatted || '0.0 Mbps';
+
+  const emptyEl = document.getElementById('bw-chart-empty');
+  if (history.length < 2) {
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+  emptyEl.classList.add('hidden');
+
+  const width = 300;
+  const height = 80;
+  const maxVal = Math.max(...history.map(h => Math.max(h.rxMbps, h.txMbps)), 1);
+
+  const rxPoints = [];
+  const txPoints = [];
+
+  const step = width / (history.length - 1);
+  history.forEach((pt, idx) => {
+    const x = (idx * step).toFixed(1);
+    const rxY = (height - (pt.rxMbps / maxVal) * (height - 10) - 5).toFixed(1);
+    const txY = (height - (pt.txMbps / maxVal) * (height - 10) - 5).toFixed(1);
+
+    rxPoints.push(`${x},${rxY}`);
+    txPoints.push(`${x},${txY}`);
+  });
+
+  const rxPoly = rxPoints.join(' ');
+  const txPoly = txPoints.join(' ');
+
+  document.getElementById('bw-rx-line').setAttribute('points', rxPoly);
+  document.getElementById('bw-tx-line').setAttribute('points', txPoly);
+
+  const rxArea = `0,${height} ${rxPoly} ${width},${height}`;
+  const txArea = `0,${height} ${txPoly} ${width},${height}`;
+
+  document.getElementById('bw-rx-area').setAttribute('points', rxArea);
+  document.getElementById('bw-tx-area').setAttribute('points', txArea);
+}
+
+function renderConnectedDevices(devices) {
+  const tbody = document.getElementById('devices-tbody');
+  const emptyEl = document.getElementById('devices-empty');
+  const badgeEl = document.getElementById('devices-badge');
+
+  badgeEl.textContent = `${devices.length} Online`;
+
+  if (!devices || devices.length === 0) {
+    tbody.innerHTML = '';
+    emptyEl.classList.remove('hidden');
+    return;
+  }
+
+  emptyEl.classList.add('hidden');
+  tbody.innerHTML = devices.map(device => {
+    const geo = device.geo || { flag: '🌐', country: 'Unknown', city: '' };
+    const locStr = geo.city ? `${geo.city}, ${geo.country}` : geo.country;
+
+    return `
+      <tr class="hover:bg-[#181d26]/60 transition-colors">
+        <td class="py-3 font-semibold text-white flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_#10b981]"></span>
+          <span>${device.username}</span>
+        </td>
+        <td class="py-3 text-slate-300">
+          <span class="text-sm mr-1">${geo.flag}</span>
+          <span class="text-slate-300 font-sans text-xs">${locStr}</span>
+        </td>
+        <td class="py-3 text-slate-300">
+          <span class="badge badge-emerald font-sans">${device.protocol}</span>
+        </td>
+        <td class="py-3 text-slate-400 font-mono text-[11px]">${device.remoteIp}</td>
+        <td class="py-3 text-blue-400 font-semibold font-mono">${device.virtualIp}</td>
+        <td class="py-3 text-slate-300 font-mono text-[11px]">↓ ${device.inBytesFormatted} / ↑ ${device.outBytesFormatted}</td>
+        <td class="py-3 text-slate-400 font-mono text-[11px]">${device.duration}</td>
+        <td class="py-3 text-right">
+          ${device.stateId ? `
+            <button onclick="kickDevice('${device.stateId}')" class="btn btn-danger py-1 px-2 text-[10px] flex items-center justify-end w-full" title="Disconnect Client">
+              <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"></path></svg> KICK
+            </button>
+          ` : `
+            <span class="text-[11px] font-bold text-emerald-400">CONNECTED</span>
+          `}
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function renderUsersList(users) {
+  const grid = document.getElementById('users-grid');
+  const emptyState = document.getElementById('users-empty');
+
+  if (!users || users.length === 0) {
+    grid.innerHTML = '';
+    emptyState.classList.remove('hidden');
+    return;
+  }
+
+  emptyState.classList.add('hidden');
+  grid.innerHTML = users.map(user => `
+    <div class="surface-card p-4 flex flex-col justify-between space-y-4">
+      <div>
+        <div class="flex items-center justify-between mb-2">
+          <div class="flex items-center gap-2.5">
+            <div class="w-8 h-8 rounded bg-[#1f2532] border border-[#242b38] flex items-center justify-center font-bold text-xs ${user.isOnline ? 'text-emerald-400 border-emerald-500/40 shadow-[0_0_8px_rgba(16,185,129,0.15)]' : 'text-blue-400'}">
+              ${user.name.slice(0, 2).toUpperCase()}
+            </div>
+            <div>
+              <div class="flex items-center gap-1.5">
+                <span class="font-bold text-sm text-white font-mono leading-tight">${user.name}</span>
+                ${user.isOnline ? '<span class="w-2 h-2 rounded-full bg-emerald-500 shadow-[0_0_6px_#10b981]" title="Device Connected"></span>' : ''}
+              </div>
+              <div class="flex items-center gap-1.5 mt-1">
+                ${user.isOnline ? '<span class="badge badge-emerald">ONLINE</span>' : ''}
+                ${user.hasIkev2 ? '<span class="badge badge-cobalt">IKEv2</span>' : ''}
+                ${user.hasL2tp ? '<span class="badge badge-amber">L2TP</span>' : ''}
+                ${user.hasWg ? '<span class="badge bg-blue-500/10 text-blue-400 border border-blue-500/20">WG</span>' : ''}
+                ${user.hasSs ? '<span class="badge bg-purple-500/10 text-purple-400 border border-purple-500/20">SS</span>' : ''}
+              </div>
+            </div>
+          </div>
+
+          <button onclick="deleteUser('${user.name}')" class="text-slate-500 hover:text-rose-400 p-1.5 transition-colors rounded hover:bg-[#1f2532]" title="Revoke Client">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+          </button>
+        </div>
+
+        <!-- Per-Client AdBlock Switch -->
+        <div class="mt-3 pt-2.5 border-t border-[#242b38]/60 flex items-center justify-between">
+          <div class="flex items-center gap-1.5 text-xs text-slate-300">
+            <span>🛡️ Ad & Malware Block</span>
+            ${user.adblockEnabled ? '<span class="text-[10px] text-emerald-400 font-bold font-mono">ON</span>' : '<span class="text-[10px] text-slate-500 font-mono">OFF</span>'}
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" ${user.adblockEnabled ? 'checked' : ''} onchange="toggleClientAdblock('${user.name}', this.checked)">
+            <span class="slider"></span>
+          </label>
+        </div>
+      </div>
+
+      <div class="pt-3 border-t border-[#242b38] flex items-center justify-end">
+        <button onclick="openGuideModal('${user.name}')" class="btn-primary text-[11px] py-1.5 px-3">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          <span>Connect device</span>
+        </button>
+      </div>
+    </div>
+  `).join('');
+}
+
+async function toggleClientAdblock(username, enabled) {
+  try {
+    const res = await fetch('/api/adblock/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, enabled })
+    });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`AdBlock ${enabled ? 'Enabled' : 'Disabled'} for '${username}'`, 'success');
+      fetchDashboardData();
+    } else {
+      showToast(data.error || 'Failed to update AdBlock setting', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to communicate with server', 'error');
+  }
+}
+
+function updateClientFilterDropdown(users) {
+  const select = document.getElementById('log-filter-client');
+  if (!select) return;
+  const currentVal = select.value;
+  let options = '<option value="">All Clients</option>';
+  for (const u of users) {
+    options += `<option value="${u.name}" ${currentVal === u.name ? 'selected' : ''}>${u.name}</option>`;
+  }
+  select.innerHTML = options;
+}
+
+function handleSearch(e) {
+  const query = e.target.value.toLowerCase();
+  const filtered = serverState.users.filter(u => u.name.toLowerCase().includes(query));
+  renderUsersList(filtered);
+}
+
+// -----------------------------------------------------------------------------
+// Browsing Activity & DNS Logs Controller
+// -----------------------------------------------------------------------------
+async function fetchLogsData() {
+  try {
+    const offset = serverState.logsPage * serverState.logsLimit;
+    const url = `/api/logs?limit=${serverState.logsLimit}&offset=${offset}&search=${encodeURIComponent(serverState.logsSearch)}&client=${encodeURIComponent(serverState.logsClient)}&status=${encodeURIComponent(serverState.logsStatus)}`;
+
+    const [logsRes, statsRes] = await Promise.all([
+      fetch(url),
+      fetch('/api/logs/stats')
+    ]);
+
+    if (logsRes.status === 401) return checkAuth();
+
+    const logsData = await logsRes.json();
+    const statsData = await statsRes.json();
+
+    serverState.logs = logsData.logs || [];
+    serverState.logsTotal = logsData.total || 0;
+
+    renderLogsStats(statsData);
+    renderLogsTable(serverState.logs, serverState.logsTotal);
+  } catch (err) {
+    console.error('Logs fetch error:', err);
+  }
+}
+
+function renderLogsStats(stats) {
+  document.getElementById('stat-log-today').textContent = (stats.totalToday || 0).toLocaleString();
+  document.getElementById('stat-log-blocked').textContent = (stats.blockedToday || 0).toLocaleString();
+
+  const chipsContainer = document.getElementById('top-domains-chips');
+  if (!stats.topDomains || stats.topDomains.length === 0) {
+    chipsContainer.innerHTML = '<span class="text-xs text-slate-500 italic">No queries recorded yet today</span>';
+    return;
+  }
+
+  chipsContainer.innerHTML = stats.topDomains.map(d => `
+    <button onclick="filterByDomain('${d.domain}')" class="domain-chip">
+      <span>${d.domain}</span>
+      <span class="text-[10px] text-blue-400 bg-[#0a0c10] px-1.5 py-0.5 rounded">${d.query_count}</span>
+    </button>
+  `).join('');
+}
+
+function renderLogsTable(logs, total) {
+  const tbody = document.getElementById('logs-tbody');
+  const emptyEl = document.getElementById('logs-empty');
+  const paginationInfo = document.getElementById('logs-pagination-info');
+  const btnPrev = document.getElementById('btn-prev-page');
+  const btnNext = document.getElementById('btn-next-page');
+
+  if (!logs || logs.length === 0) {
+    tbody.innerHTML = '';
+    emptyEl.classList.remove('hidden');
+    paginationInfo.textContent = 'Showing 0-0 of 0';
+    btnPrev.disabled = true;
+    btnNext.disabled = true;
+    return;
+  }
+
+  emptyEl.classList.add('hidden');
+  tbody.innerHTML = logs.map(log => {
+    const d = new Date(log.timestamp);
+    const timeFormatted = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    const dateFormatted = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const isBlocked = log.status === 'BLOCKED';
+
+    return `
+      <tr class="hover:bg-[#181d26]/60 transition-colors">
+        <td class="py-2.5 text-slate-400">
+          <div>${timeFormatted}</div>
+          <div class="text-[10px] text-slate-500 font-sans">${dateFormatted}</div>
+        </td>
+        <td class="py-2.5 font-bold text-white flex items-center gap-2">
+          <div class="w-5 h-5 rounded bg-[#1f2532] text-blue-400 flex items-center justify-center text-[10px]">
+            ${log.client_name.slice(0, 1).toUpperCase()}
+          </div>
+          <span>${log.client_name}</span>
+        </td>
+        <td class="py-2.5 text-slate-400 font-mono text-[11px]">${log.client_ip}</td>
+        <td class="py-2.5">
+          <a href="https://${log.domain}" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:underline font-semibold flex items-center gap-1.5 ${isBlocked ? 'line-through text-slate-400' : ''}">
+            <svg class="w-3 h-3 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
+            <span>${log.domain}</span>
+          </a>
+        </td>
+        <td class="py-2.5 text-center">
+          ${isBlocked ? '<span class="badge badge-rose">🛡️ BLOCKED</span>' : '<span class="badge badge-emerald">RESOLVED</span>'}
+        </td>
+        <td class="py-2.5 text-right">
+          <span class="badge badge-cobalt text-[10px]">${log.qtype || 'A'}</span>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  const startIdx = serverState.logsPage * serverState.logsLimit + 1;
+  const endIdx = Math.min(startIdx + logs.length - 1, total);
+  paginationInfo.textContent = `Showing ${startIdx}-${endIdx} of ${total.toLocaleString()}`;
+
+  btnPrev.disabled = serverState.logsPage === 0;
+  btnNext.disabled = endIdx >= total;
+}
+
+function changeLogPage(delta) {
+  serverState.logsPage = Math.max(0, serverState.logsPage + delta);
+  fetchLogsData();
+}
+
+function filterByDomain(domain) {
+  serverState.logsSearch = domain;
+  const searchInput = document.getElementById('log-search');
+  if (searchInput) searchInput.value = domain;
+  serverState.logsPage = 0;
+  fetchLogsData();
+}
+
+function exportLogsCsv() {
+  const client = serverState.logsClient;
+  const status = serverState.logsStatus;
+  window.location.href = `/api/logs/export/csv?client=${encodeURIComponent(client)}&status=${encodeURIComponent(status)}`;
+}
+
+async function clearAllLogs() {
+  if (!confirm('Are you sure you want to delete all stored browsing history logs? This action cannot be undone.')) {
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/logs/clear', { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      showToast('All browsing history logs cleared', 'success');
+      fetchLogsData();
+    } else {
+      showToast(data.error || 'Failed to clear logs', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to communicate with server', 'error');
+  }
+}
+
+// -----------------------------------------------------------------------------
+// User Creation & Actions
+// -----------------------------------------------------------------------------
+function openAddUserModal() {
+  document.getElementById('new-username').value = '';
+  document.getElementById('new-password').value = '';
+  document.getElementById('modal-add-user').classList.add('active');
+}
+
+async function handleCreateUser(e) {
+  e.preventDefault();
+  const username = document.getElementById('new-username').value.trim();
+  const password = document.getElementById('new-password').value.trim();
+  const submitBtn = document.getElementById('btn-create-submit');
+
+  if (!username) return;
+
+  submitBtn.disabled = true;
+  submitBtn.innerHTML = `
+    <svg class="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+    Generating Certificates...
+  `;
+
+  try {
+    const res = await fetch('/api/users', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if (data.success) {
+      closeModal('modal-add-user');
+      showToast(`Client '${username}' created successfully!`, 'success');
+      if (!password && data.user && data.user.password) {
+        window.prompt('Copy the generated L2TP password:', data.user.password);
+      }
+      await fetchDashboardData();
+      openGuideModal(username);
+    } else {
+      showToast(data.error || 'Failed to create user', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to communicate with server', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.innerHTML = '<span>Generate Client</span>';
+  }
+}
+
+async function deleteUser(username) {
+  if (!confirm(`Are you sure you want to revoke and delete client '${username}'?`)) {
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/users/${username}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`Client '${username}' deleted.`, 'success');
+      fetchDashboardData();
+    } else {
+      showToast(data.error || 'Failed to delete client', 'error');
+    }
+  } catch (err) {
+    showToast('Server error while deleting user', 'error');
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Modals & Helper Views
+// -----------------------------------------------------------------------------
+function renderConnectionConfig(containerId, textId, qrId, value) {
+  const container = document.getElementById(containerId);
+  container.classList.toggle('hidden', !value);
+  if (!value) return;
+
+  const normalizedValue = `${value.replace(/\r\n/g, '\n').trim()}\n`;
+  document.getElementById(textId).textContent = normalizedValue;
+  const qr = document.getElementById(qrId);
+  qr.innerHTML = '';
+  if (typeof QRCode !== 'undefined') {
+    new QRCode(qr, {
+      text: normalizedValue,
+      width: 512,
+      height: 512,
+      colorDark: '#000000',
+      colorLight: '#ffffff',
+      correctLevel: QRCode.CorrectLevel.L
+    });
+  }
+}
+
+async function downloadClientArtifact(username, type, button) {
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Preparing…';
+  try {
+    const response = await fetch(`/api/users/${encodeURIComponent(username)}/download/${type}`);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || 'Download could not be prepared.');
+    }
+
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+    const fallbackNames = {
+      'windows-zip': `${username}_windows_ikev2.zip`,
+      mobileconfig: `${username}.mobileconfig`,
+      sswan: `${username}.sswan`,
+      wireguard: `${username}.conf`,
+      p12: `${username}.p12`
+    };
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = filenameMatch ? filenameMatch[1] : fallbackNames[type];
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    showToast(`${link.download} downloaded.`, 'success');
   } catch (error) {
-    $('header-health').textContent = 'Gateway unavailable';
+    showToast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+}
+
+async function openGuideModal(username) {
+  const user = serverState.users.find((item) => item.name === username);
+  if (!user) {
+    showToast('Client details are still loading. Try again.', 'error');
+    return;
+  }
+
+  document.getElementById('guide-username').textContent = username;
+  const downloads = [
+    ['guide-btn-win-zip', 'windows-zip'],
+    ['guide-btn-apple', 'mobileconfig'],
+    ['guide-btn-android', 'sswan'],
+    ['guide-btn-wireguard', 'wireguard'],
+    ['guide-btn-p12', 'p12']
+  ];
+  for (const [buttonId, type] of downloads) {
+    const button = document.getElementById(buttonId);
+    button.onclick = () => downloadClientArtifact(username, type, button);
+  }
+
+  try {
+    const response = await fetch(`/api/users/${encodeURIComponent(username)}/configs`);
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || 'Connection configuration could not be loaded.');
+    }
+    const { wgConfig = '', ssUri = '', androidCertificatePassword = '' } = await response.json();
+    document.getElementById('guide-android-password').textContent = androidCertificatePassword;
+    renderConnectionConfig('guide-wireguard', 'guide-wg-config', 'guide-wg-qrcode', wgConfig);
+    renderConnectionConfig('guide-shadowsocks', 'guide-ss-config', 'guide-ss-qrcode', ssUri);
+    document.getElementById('guide-modern-protocols').classList.toggle('hidden', !wgConfig && !ssUri);
+    document.getElementById('modal-guide').classList.add('active');
+  } catch (error) {
     showToast(error.message, 'error');
   }
 }
 
-function renderStatus(data) {
-  $('header-health').textContent = data.vpnStatus === 'online' ? 'Gateway healthy' : 'Gateway degraded';
-  $('stat-ip').textContent = data.serverIp || 'Unconfigured';
-  $('stat-tunnels').textContent = String(data.activeConnections || 0);
-  $('card-ip').textContent = data.serverIp || 'Unconfigured';
-  $('card-tunnels').textContent = String(data.activeConnections || 0);
-  $('card-load').textContent = `${data.loadAverage || '0.00'} / ${data.memoryUsagePercent || 0}%`;
-  $('stat-scope').textContent = data.metricScope || 'unknown';
-  const minutes = Math.max(0, Math.floor((data.uptimeSeconds || 0) / 60));
-  const days = Math.floor(minutes / 1440);
-  const hours = Math.floor((minutes % 1440) / 60);
-  $('stat-uptime').textContent = days ? `${days}d ${hours}h` : `${hours}h ${minutes % 60}m`;
+function showDiagnostics() {
+  document.getElementById('diag-raw-output').textContent = serverState.rawTelemetry || 'No daemon output available.';
+  document.getElementById('modal-diag').classList.add('active');
 }
 
-function renderBandwidth(bandwidth) {
-  const current = bandwidth.current || {};
-  const history = bandwidth.history || [];
-  $('bw-rx-current').textContent = current.rxFormatted || '0 KB/s';
-  $('bw-tx-current').textContent = current.txFormatted || '0 KB/s';
-  $('bw-chart-empty').hidden = history.length >= 2;
-  if (history.length < 2) return;
-  const width = 600;
-  const height = 180;
-  const max = Math.max(1, ...history.flatMap((point) => [point.rxMbps || 0, point.txMbps || 0]));
-  const points = (key) => history.map((point, index) => `${(index * width / (history.length - 1)).toFixed(1)},${(height - ((point[key] || 0) / max) * 160 - 10).toFixed(1)}`).join(' ');
-  const rx = points('rxMbps');
-  $('bw-rx-line').setAttribute('points', rx);
-  $('bw-tx-line').setAttribute('points', points('txMbps'));
-  $('bw-rx-area').setAttribute('points', `0,${height} ${rx} ${width},${height}`);
+// -----------------------------------------------------------------------------
+// Backup Export & Import
+// -----------------------------------------------------------------------------
+function exportBackup() {
+  showToast('Preparing backup archive...', 'info');
+  window.location.href = '/api/backup/export';
 }
 
-function renderDevices(devices) {
-  const list = $('devices-list');
-  list.replaceChildren();
-  $('devices-badge').textContent = `${devices.length} online`;
-  $('devices-empty').hidden = devices.length > 0;
-  for (const device of devices) {
-    const location = device.geo?.city ? `${device.geo.city}, ${device.geo.country}` : device.geo?.country || 'Location private';
-    const copy = node('div', { className: 'connection-copy' }, [node('strong', { text: device.username || 'Unknown client' }), node('small', { text: `${device.protocol} · ${location} · ${device.duration}` })]);
-    const action = device.stateId ? node('button', { className: 'button button-danger', text: 'Disconnect', attrs: { type: 'button', 'data-action': 'kick', 'data-state-id': device.stateId, 'aria-label': `Disconnect ${device.username}` } }) : node('span', { className: 'status-pill', text: 'connected' });
-    list.append(node('div', { className: 'connection-item' }, [node('span', { className: 'connection-avatar', text: (device.username || '?').slice(0, 1).toUpperCase() }), copy, action]));
-  }
+function openImportModal() {
+  const fileInput = document.getElementById('import-file');
+  if (fileInput) fileInput.value = '';
+  document.getElementById('import-progress').classList.add('hidden');
+  document.getElementById('btn-import-submit').disabled = false;
+  document.getElementById('modal-import').classList.add('active');
 }
-
-function protocolTag(label) { return node('span', { className: 'protocol-tag', text: label }); }
-
-function renderUsers(users) {
-  const list = $('users-grid');
-  list.replaceChildren();
-  $('users-empty').hidden = users.length > 0;
-  for (const user of users) {
-    const identity = node('div', { className: 'client-identity' }, [node('span', { className: 'client-initials', text: user.name.slice(0, 2).toUpperCase() }), node('div', {}, [node('strong', { text: user.name }), node('small', { text: user.isOnline ? 'Connected now' : 'Offline' })])]);
-    const protocols = node('div', { className: 'protocol-list' });
-    if (user.hasIkev2) protocols.append(protocolTag('IKEv2'));
-    if (user.hasL2tp) protocols.append(protocolTag('L2TP'));
-    if (user.hasWg) protocols.append(protocolTag('WireGuard'));
-    if (user.hasSs) protocols.append(protocolTag('Shadowsocks'));
-    const toggle = node('label', { className: 'toggle-control' }, [node('input', { attrs: { type: 'checkbox', 'data-adblock-user': user.name, 'aria-label': `Ad and malware blocking for ${user.name}` } }), node('span', { text: 'Block ads' })]);
-    toggle.querySelector('input').checked = Boolean(user.adblockEnabled);
-    const actions = node('div', { className: 'client-actions' }, [toggle, node('button', { className: 'button button-quiet', text: 'Connect', attrs: { type: 'button', 'data-action': 'guide', 'data-username': user.name } })]);
-    if (user.hasWg || user.hasSs) actions.append(node('button', { className: 'button button-quiet', text: 'QR configs', attrs: { type: 'button', 'data-action': 'configs', 'data-username': user.name } }));
-    actions.append(node('button', { className: 'button button-danger', text: 'Delete', attrs: { type: 'button', 'data-action': 'delete', 'data-username': user.name } }));
-    list.append(node('article', { className: 'client-row' }, [identity, protocols, actions]));
-  }
-}
-
-function renderClientOptions(users) {
-  const select = $('log-filter-client');
-  const current = select.value;
-  select.replaceChildren(node('option', { text: 'All clients', attrs: { value: '' } }));
-  users.forEach((user) => select.append(node('option', { text: user.name, attrs: { value: user.name } })));
-  select.value = users.some((user) => user.name === current) ? current : '';
-}
-
-async function kickDevice(stateId) {
-  if (!window.confirm('Disconnect this tunnel now? The client may reconnect automatically.')) return;
-  try { await fetchJson('/api/connections/kick', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stateId }) }); await refreshDashboard(); showToast('Tunnel disconnected.'); } catch (error) { showToast(error.message, 'error'); }
-}
-
-function openCreateClient() {
-  $('form-add-user').reset();
-  openDialog('modal-add-user');
-  requestAnimationFrame(() => $('new-username').focus());
-}
-
-async function handleCreateUser(event) {
-  event.preventDefault();
-  if (!event.currentTarget.reportValidity()) return;
-  const submit = $('btn-create-submit');
-  submit.disabled = true;
-  submit.textContent = 'Provisioning…';
-  try {
-    const data = await fetchJson('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('new-username').value.trim(), password: $('new-password').value }) , timeout: 90_000 });
-    $('modal-add-user').close();
-    if (!$('new-password').value && data.user?.password) {
-      try {
-        await navigator.clipboard.writeText(data.user.password);
-        showToast('Client created. The generated password is copied to your clipboard.');
-      } catch {
-        window.prompt('Client created. Copy this generated password now; it will not be shown again.', data.user.password);
-      }
-    } else showToast('Client created across all protocols.');
-    await refreshDashboard();
-    openGuide(data.user.name);
-  } catch (error) { showToast(error.message, 'error'); }
-  finally { submit.disabled = false; submit.textContent = 'Create client'; }
-}
-
-async function deleteUser(username) {
-  if (!window.confirm(`Delete ${username}? Certificates and protocol credentials will be revoked immediately.`)) return;
-  try { await fetchJson(`/api/users/${encodeURIComponent(username)}`, { method: 'DELETE', timeout: 90_000 }); showToast(`${username} was deleted.`); await refreshDashboard(); } catch (error) { showToast(error.message, 'error'); }
-}
-
-async function toggleAdblock(username, enabled, input) {
-  input.disabled = true;
-  try { await fetchJson('/api/adblock/toggle', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, enabled }) }); showToast(`Ad blocking ${enabled ? 'enabled' : 'disabled'} for ${username}.`); } catch (error) { input.checked = !enabled; showToast(error.message, 'error'); } finally { input.disabled = false; }
-}
-
-async function openGuide(username) {
-  $('guide-username').textContent = username;
-  $('guide-btn-win-zip').onclick = () => { window.location.assign(`/api/users/${encodeURIComponent(username)}/download/windows-zip`); };
-  $('guide-link-apple').href = `/api/users/${encodeURIComponent(username)}/download/mobileconfig`;
-  $('guide-link-android').href = `/api/users/${encodeURIComponent(username)}/download/sswan`;
-  $('guide-powershell-cmd').textContent = `certutil -f -importpfx "${username}.p12" NoExport\nAdd-VpnConnection -ServerAddress '${state.serverIp}' -Name 'OmniVPN' -TunnelType IKEv2 -AuthenticationMethod MachineCertificate -EncryptionLevel Required -PassThru`;
-  $('guide-config-password').textContent = 'Unavailable';
-  openDialog('modal-guide');
-  try {
-    const secret = await fetchJson('/api/secrets/ikev2-config-password');
-    $('guide-config-password').textContent = secret.password;
-  } catch {}
-}
-
-async function openConfigs(username) {
-  try {
-    const data = await fetchJson(`/api/users/${encodeURIComponent(username)}/configs`);
-    $('extra-username').textContent = username;
-    $('wg-config-text').textContent = data.wgConfig || 'WireGuard configuration unavailable.';
-    $('ss-config-text').textContent = data.ssUri || 'Shadowsocks configuration unavailable.';
-    const renderQr = (container, text) => {
-      container.replaceChildren();
-      if (text && window.QRCode) new window.QRCode(container, { text, width: 160, height: 160, colorDark: '#29251f', colorLight: '#ffffff', correctLevel: window.QRCode.CorrectLevel.M });
-    };
-    renderQr($('wg-qrcode'), data.wgConfig);
-    renderQr($('ss-qrcode'), data.ssUri);
-    openDialog('modal-extra-configs');
-  } catch (error) { showToast(error.message, 'error'); }
-}
-
-async function togglePsk() {
-  const output = $('card-psk');
-  if (output.dataset.revealed === 'true') return hidePsk();
-  try {
-    const data = await fetchJson('/api/secrets/ipsec-psk');
-    output.textContent = data.psk;
-    output.dataset.revealed = 'true';
-    $('action-toggle-psk').textContent = 'Hide now';
-    clearTimeout(state.pskTimer);
-    state.pskTimer = setTimeout(hidePsk, 15_000);
-  } catch (error) { showToast(error.message, 'error'); }
-}
-
-function hidePsk() { $('card-psk').textContent = 'Protected'; $('card-psk').dataset.revealed = 'false'; $('action-toggle-psk').textContent = 'Reveal briefly'; }
-function showDiagnostics() { $('diag-raw-output').textContent = state.rawTelemetry || 'No diagnostic output is available.'; openDialog('modal-diag'); }
-function openDialog(id) { const dialog = $(id); if (!dialog.open) dialog.showModal(); }
-
-async function fetchLogs() {
-  try {
-    const query = new URLSearchParams({ limit: state.logsLimit, offset: state.logsPage * state.logsLimit, search: state.logsSearch, client: state.logsClient, status: state.logsStatus });
-    const [logs, stats] = await Promise.all([fetchJson(`/api/logs?${query}`), fetchJson('/api/logs/stats')]);
-    state.logsTotal = logs.total || 0;
-    renderLogStats(stats);
-    renderLogs(logs.logs || []);
-  } catch (error) { showToast(error.message, 'error'); }
-}
-
-function renderLogStats(stats) {
-  $('stat-log-today').textContent = Number(stats.totalToday || 0).toLocaleString();
-  $('stat-log-blocked').textContent = Number(stats.blockedToday || 0).toLocaleString();
-  const domains = $('top-domains-chips');
-  domains.replaceChildren();
-  if (!stats.topDomains?.length) domains.append(node('span', { text: 'No recorded domains today.' }));
-  else stats.topDomains.forEach((domain) => domains.append(node('button', { className: 'domain-chip', text: `${domain.domain} · ${domain.query_count}`, attrs: { type: 'button', 'data-domain': domain.domain } })));
-}
-
-function renderLogs(logs) {
-  const body = $('logs-tbody');
-  body.replaceChildren();
-  $('logs-empty').hidden = logs.length > 0;
-  logs.forEach((log) => {
-    const date = new Date(log.timestamp);
-    const domainLink = node('a', { text: log.domain, attrs: { href: `https://${log.domain}`, target: '_blank', rel: 'noopener noreferrer' } });
-    body.append(node('tr', {}, [node('td', { text: new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date) }), node('td', { text: log.client_name || 'VPN client' }), node('td', { text: log.client_ip }), node('td', {}, domainLink), node('td', { text: log.status === 'BLOCKED' ? 'Blocked' : 'Resolved' }), node('td', { text: log.qtype || 'A' })]));
-  });
-  const start = logs.length ? state.logsPage * state.logsLimit + 1 : 0;
-  const end = Math.min(start + logs.length - 1, state.logsTotal);
-  $('logs-pagination-info').textContent = `Showing ${start}–${Math.max(0, end)} of ${state.logsTotal.toLocaleString()}`;
-  $('btn-prev-page').disabled = state.logsPage === 0;
-  $('btn-next-page').disabled = end >= state.logsTotal;
-}
-
-function filterByDomain(domain) { state.logsSearch = domain; state.logsPage = 0; $('log-search').value = domain; fetchLogs(); }
-function changeLogPage(delta) { state.logsPage = Math.max(0, state.logsPage + delta); fetchLogs(); }
-function exportLogs() { window.location.assign(`/api/logs/export/csv?client=${encodeURIComponent(state.logsClient)}&status=${encodeURIComponent(state.logsStatus)}`); }
-
-async function clearLogs() {
-  if (!window.confirm('Permanently clear all recorded DNS activity?')) return;
-  try { await fetchJson('/api/logs/clear', { method: 'DELETE' }); state.logsPage = 0; await fetchLogs(); showToast('DNS history cleared.'); } catch (error) { showToast(error.message, 'error'); }
-}
-
-function exportBackup() { showToast('Preparing an encrypted backup…'); window.location.assign('/api/backup/export'); }
 
 async function importBackup() {
-  const file = $('import-file').files?.[0];
-  if (!file) return showToast('Choose an OmniVPN backup first.', 'error');
-  if (!window.confirm('Restore this backup and restart every VPN service? Current credentials will be replaced.')) return;
-  const button = $('btn-import-submit');
-  button.disabled = true;
-  $('import-progress').hidden = false;
-  const body = new FormData();
-  body.append('backup', file);
-  try { await fetchJson('/api/backup/import', { method: 'POST', body, timeout: 180_000 }); $('modal-import').close(); showToast('Backup restored. VPN services are restarting.'); setTimeout(refreshDashboard, 5_000); } catch (error) { showToast(error.message, 'error'); } finally { button.disabled = false; $('import-progress').hidden = true; }
+  const fileInput = document.getElementById('import-file');
+  if (!fileInput.files || fileInput.files.length === 0) {
+    showToast('Please select a backup file first.', 'error');
+    return;
+  }
+
+  if (!confirm('This will overwrite ALL current certificates, user accounts, and credentials. The VPN server will restart. Are you sure?')) {
+    return;
+  }
+
+  const submitBtn = document.getElementById('btn-import-submit');
+  const progressEl = document.getElementById('import-progress');
+  submitBtn.disabled = true;
+  progressEl.classList.remove('hidden');
+
+  const formData = new FormData();
+  formData.append('backup', fileInput.files[0]);
+
+  try {
+    const res = await fetch('/api/backup/import', {
+      method: 'POST',
+      body: formData
+    });
+    const data = await res.json();
+
+    if (data.success) {
+      closeModal('modal-import');
+      showToast('Backup imported! VPN is restarting...', 'success');
+
+      if (data.restored && data.restored.length > 0) {
+        setTimeout(() => {
+          showToast(`Restored: ${data.restored.join(', ')}`, 'success');
+        }, 1500);
+      }
+
+      // Reload data after a brief delay for VPN restart
+      setTimeout(() => fetchDashboardData(), 5000);
+    } else {
+      showToast(data.error || 'Import failed.', 'error');
+    }
+  } catch (err) {
+    showToast('Failed to upload backup: ' + err.message, 'error');
+  } finally {
+    submitBtn.disabled = false;
+    progressEl.classList.add('hidden');
+  }
 }
 
-async function copyText(id) {
-  try { await navigator.clipboard.writeText($(id).textContent); showToast('Copied to clipboard.'); } catch { showToast('Clipboard access was denied. Select and copy the text manually.', 'error'); }
+function closeModal(modalId) {
+  document.getElementById(modalId).classList.remove('active');
+}
+
+function copyElementText(elementId) {
+  const text = document.getElementById(elementId).textContent;
+  navigator.clipboard.writeText(text);
+  showToast('Copied to clipboard!', 'success');
 }
 
 function showToast(message, type = 'info') {
-  const toast = node('div', { className: 'toast', text: message, attrs: { 'data-type': type } });
-  $('toast-container').replaceChildren(toast);
-  setTimeout(() => toast.remove(), 4_500);
+  const container = document.getElementById('toast-container');
+  const toast = document.createElement('div');
+  toast.className = 'toast';
+
+  let icon = 'ℹ️';
+  if (type === 'success') icon = '✅';
+  if (type === 'error') icon = '⚠️';
+
+  toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+  container.appendChild(toast);
+
+  setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateX(20px)';
+    toast.style.transition = 'all 0.2s ease';
+    setTimeout(() => toast.remove(), 200);
+  }, 3000);
 }

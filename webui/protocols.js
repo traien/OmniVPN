@@ -7,6 +7,8 @@ const USERS_DB = '/app/data/users.json';
 const WG_CONF = '/etc/wireguard/wg_confs/wg0.conf';
 const XRAY_CONF = '/etc/xray/config.json';
 const SERVER_IP = process.env.VPN_PUBLIC_IP || '127.0.0.1';
+const WG_POST_UP = 'PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth+ -j MASQUERADE';
+const WG_POST_DOWN = 'PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth+ -j MASQUERADE';
 
 function initProtocols() {
   if (!fs.existsSync('/app/data')) fs.mkdirSync('/app/data', { recursive: true });
@@ -17,9 +19,15 @@ function initProtocols() {
   if (!fs.existsSync(WG_CONF) || !fs.readFileSync(WG_CONF, 'utf8').includes('PrivateKey')) {
     try {
       const priv = runFileSync('wg', ['genkey']).trim();
-      const conf = `[Interface]\nAddress = 10.8.0.1\nListenPort = 51820\nPrivateKey = ${priv}\n`;
+      const conf = `[Interface]\nAddress = 10.8.0.1\nListenPort = 51820\nPrivateKey = ${priv}\n${WG_POST_UP}\n${WG_POST_DOWN}\n`;
       writeSecretFile(WG_CONF, conf);
     } catch(e) { console.error("WG genkey failed", e); }
+  } else {
+    const current = fs.readFileSync(WG_CONF, 'utf8');
+    if (!current.includes('PostUp =')) {
+      const migrated = current.replace(/(PrivateKey\s*=\s*[^\n]+\n)/, `$1${WG_POST_UP}\n${WG_POST_DOWN}\n`);
+      writeSecretFile(WG_CONF, migrated);
+    }
   }
 
   // Init Xray
@@ -53,6 +61,11 @@ function initProtocols() {
     };
     writeSecretFile(XRAY_CONF, JSON.stringify(conf, null, 2));
   }
+
+  // Rebuild runtime configs on startup so existing clients receive format migrations too.
+  const stored = getDb();
+  syncWg(stored);
+  syncXray(stored);
 }
 
 function getDb() {
@@ -108,7 +121,7 @@ function syncXray(db) {
   let clients = [];
   for (const [name, u] of Object.entries(db.users)) {
     if (u.xrayPass) {
-      clients.push({ password: u.xrayPass, email: name });
+      clients.push({ method: 'aes-128-gcm', password: u.xrayPass, email: name });
     }
   }
   if (conf.inbounds && conf.inbounds[0] && conf.inbounds[0].settings) {

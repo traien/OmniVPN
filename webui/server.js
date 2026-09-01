@@ -30,6 +30,7 @@ const app = express();
 const PORT = process.env.WEBUI_PORT || 8080;
 const SERVER_IP = process.env.VPN_PUBLIC_IP || '';
 const VPN_PSK = process.env.VPN_IPSEC_PSK || '';
+const ANDROID_CERTIFICATE_PASSWORD = 'omnivpn';
 
 if (!SERVER_IP || !VPN_PSK) {
   throw new Error('VPN_PUBLIC_IP and VPN_IPSEC_PSK are required. Refusing to start with embedded defaults.');
@@ -41,7 +42,7 @@ app.use(securityHeaders);
 app.use(express.json({ limit: '32kb', strict: true }));
 app.use(cookieParser());
 app.use(sameOriginMiddleware);
-app.use(express.static(path.join(__dirname, 'public'), { etag: true, maxAge: '1h' }));
+app.use(express.static(path.join(__dirname, 'public'), { etag: true, maxAge: 0 }));
 app.use('/vendor/qrcode', express.static(path.join(__dirname, 'node_modules', 'qrcodejs'), { maxAge: '7d' }));
 
 app.get('/healthz', (req, res) => {
@@ -79,12 +80,6 @@ function copyDirectoryContents(source, destination) {
       preserveTimestamps: true
     });
   }
-}
-
-function csvCell(value) {
-  let text = String(value ?? '');
-  if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
-  return `"${text.replace(/"/g, '""')}"`;
 }
 
 // -----------------------------------------------------------------------------
@@ -267,6 +262,38 @@ async function discoverConnectedDevices() {
 let devicesCache = { expiresAt: 0, value: [] };
 let devicesRequest = null;
 
+function invalidateDevicesCache() {
+  devicesCache = { expiresAt: 0, value: [] };
+  devicesRequest = null;
+}
+
+function findParentIkeStateId(statusOutput, childStateId) {
+  const lines = String(statusOutput || '').split('\n');
+  const targetLine = lines.find((line) => line.includes(`#${childStateId}:`));
+  if (!targetLine) return null;
+
+  const instanceMatch = targetLine.match(/"[^"]+"(?:\[\d+\])?/);
+  if (!instanceMatch) return null;
+
+  const parentLine = lines.find((line) =>
+    line.includes(instanceMatch[0]) &&
+    /(?:ESTABLISHED_IKE_SA|IKE SA established|ISAKMP SA established)/.test(line) &&
+    !/CHILD_SA/.test(line)
+  );
+  const parentMatch = parentLine && parentLine.match(/#(\d+):/);
+  return parentMatch ? parentMatch[1] : null;
+}
+
+async function disconnectIpsecState(stateId) {
+  const statusResult = await runDockerExec(['ipsec', 'status']);
+  const parentStateId = statusResult.success
+    ? findParentIkeStateId(statusResult.output, stateId)
+    : null;
+  const result = await runDockerExec(['ipsec', 'whack', '--deletestate', parentStateId || stateId]);
+  if (result.success) invalidateDevicesCache();
+  return result;
+}
+
 async function getConnectedDevices() {
   if (devicesCache.expiresAt > Date.now()) return devicesCache.value;
   if (devicesRequest) return devicesRequest;
@@ -289,7 +316,7 @@ app.post('/api/connections/kick', authMiddleware, async (req, res) => {
   }
 
   try {
-    const result = await runDockerExec(['ipsec', 'whack', '--deletestate', stateId]);
+    const result = await disconnectIpsecState(stateId);
     if (result.success) {
       res.json({ success: true });
     } else {
@@ -361,15 +388,6 @@ app.get('/api/secrets/ipsec-psk', authMiddleware, (req, res) => {
   res.json({ psk: VPN_PSK });
 });
 
-app.get('/api/secrets/ikev2-config-password', authMiddleware, async (req, res) => {
-  const result = await runDockerExec(['sh', '-c', '. /etc/ipsec.d/ikev2.conf 2>/dev/null || true; printf %s "$IKEV2_CONFIG_PASSWORD"']);
-  if (!result.success || !result.output) {
-    return res.status(404).json({ error: 'IKEv2 profile protection is not enabled for this deployment.' });
-  }
-  res.setHeader('Cache-Control', 'no-store');
-  return res.json({ password: result.output });
-});
-
 app.get('/api/bandwidth', authMiddleware, (req, res) => {
   res.json(getBandwidthData());
 });
@@ -380,70 +398,6 @@ app.get('/api/devices', authMiddleware, async (req, res) => {
     res.json({ devices });
   } catch (err) {
     sendServerError(res, err, 'Connected clients are temporarily unavailable.');
-  }
-});
-
-// -----------------------------------------------------------------------------
-// Browsing Activity & DNS Logs Endpoints
-// -----------------------------------------------------------------------------
-app.get('/api/logs', authMiddleware, async (req, res) => {
-  try {
-    const { limit = 50, offset = 0, search = '', client = '', domain = '', status = '' } = req.query;
-    const data = await db.getLogs({
-      limit: Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 50)),
-      offset: Math.min(1_000_000, Math.max(0, Number.parseInt(offset, 10) || 0)),
-      search: String(search).slice(0, 200),
-      client: String(client).slice(0, 128),
-      domain: String(domain).slice(0, 253),
-      status: ['BLOCKED', 'RESOLVED'].includes(status) ? status : ''
-    });
-    res.json(data);
-  } catch (err) {
-    sendServerError(res, err, 'Activity logs are temporarily unavailable.');
-  }
-});
-
-app.get('/api/logs/stats', authMiddleware, async (req, res) => {
-  try {
-    const stats = await db.getStats();
-    stats.adblockRules = adblock.getBlocklistSize();
-    res.json(stats);
-  } catch (err) {
-    sendServerError(res, err, 'Activity statistics are temporarily unavailable.');
-  }
-});
-
-app.get('/api/logs/export/csv', authMiddleware, async (req, res) => {
-  try {
-    const { client, status } = req.query;
-    const rows = await db.getAllLogsForExport({ client, status });
-    
-    let csv = 'Timestamp,Client Name,Client IP,Domain Visited,Query Type,Status\r\n';
-    for (const row of rows) {
-      const ts = csvCell(row.created_at);
-      const name = csvCell(row.client_name || 'VPN Client');
-      const ip = csvCell(row.client_ip);
-      const domain = csvCell(row.domain);
-      const qtype = csvCell(row.qtype || 'A');
-      const st = csvCell(row.status || 'RESOLVED');
-      csv += `${ts},${name},${ip},${domain},${qtype},${st}\r\n`;
-    }
-
-    const filename = `vpn_browsing_history_${new Date().toISOString().slice(0,10)}.csv`;
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(csv);
-  } catch (err) {
-    sendServerError(res, err, 'The activity export could not be created.');
-  }
-});
-
-app.delete('/api/logs/clear', authMiddleware, async (req, res) => {
-  try {
-    const count = await db.clearLogs();
-    res.json({ success: true, count });
-  } catch (err) {
-    sendServerError(res, err, 'Activity logs could not be cleared.');
   }
 });
 
@@ -546,7 +500,10 @@ app.get('/api/users', authMiddleware, async (req, res) => {
       if (allProtos[name]) {
         u.hasWg = true;
         u.hasSs = true;
+        u.wgPriv = allProtos[name].wgPriv;
         u.wgIp = allProtos[name].wgIp;
+        u.wgPsk = allProtos[name].wgPsk;
+        u.xrayPass = allProtos[name].xrayPass;
         u.serverWgPub = serverWgPub;
       }
     }
@@ -563,7 +520,10 @@ app.get('/api/users', authMiddleware, async (req, res) => {
           hasL2tp: false,
           hasWg: true,
           hasSs: true,
+          wgPriv: p.wgPriv,
           wgIp: p.wgIp,
+          wgPsk: p.wgPsk,
+          xrayPass: p.xrayPass,
           serverWgPub,
           createdAt: new Date().toISOString()
         });
@@ -576,13 +536,9 @@ app.get('/api/users', authMiddleware, async (req, res) => {
   }
 });
 
-app.get('/api/users/:username/configs', authMiddleware, (req, res) => {
-  const { username } = req.params;
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
-    return res.status(400).json({ error: 'Invalid client name.' });
-  }
+function buildClientConnectionConfigs(username) {
   const user = protocols.getAllProtocols()[username];
-  if (!user) return res.status(404).json({ error: 'Client protocol configuration was not found.' });
+  if (!user) return null;
 
   const serverWgPub = protocols.getServerWgPub();
   const wgConfig = user.wgPriv && user.wgIp && serverWgPub
@@ -590,8 +546,18 @@ app.get('/api/users/:username/configs', authMiddleware, (req, res) => {
     : '';
   const ssToken = user.xrayPass ? Buffer.from(`aes-128-gcm:${user.xrayPass}`).toString('base64url') : '';
   const ssUri = ssToken ? `ss://${ssToken}@${SERVER_IP}:8388#OmniVPN-${encodeURIComponent(username)}` : '';
+  return { wgConfig, ssUri, androidCertificatePassword: ANDROID_CERTIFICATE_PASSWORD };
+}
+
+app.get('/api/users/:username/configs', authMiddleware, (req, res) => {
+  const { username } = req.params;
+  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
+    return res.status(400).json({ error: 'Invalid client name.' });
+  }
+  const configs = buildClientConnectionConfigs(username);
+  if (!configs) return res.status(404).json({ error: 'Client protocol configuration was not found.' });
   res.setHeader('Cache-Control', 'no-store');
-  return res.json({ wgConfig, ssUri });
+  return res.json(configs);
 });
 
 app.post('/api/users', authMiddleware, async (req, res) => {
@@ -599,8 +565,8 @@ app.post('/api/users', authMiddleware, async (req, res) => {
   if (typeof username !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
     return res.status(400).json({ error: 'Client name must contain 1–64 letters, numbers, dashes, or underscores.' });
   }
-  if (password && (typeof password !== 'string' || password.length < 12 || password.length > 128 || /[\r\n\0]/.test(password))) {
-    return res.status(400).json({ error: 'Password must contain 12–128 characters and cannot contain line breaks.' });
+  if (password && (typeof password !== 'string' || password.length > 128 || /[\r\n\0]/.test(password))) {
+    return res.status(400).json({ error: 'Password cannot exceed 128 characters or contain line breaks.' });
   }
 
   const vpnPass = password || require('crypto').randomBytes(18).toString('base64url');
@@ -661,13 +627,22 @@ app.delete('/api/users/:username', authMiddleware, async (req, res) => {
       const devices = await getConnectedDevices();
       for (const dev of devices) {
         if (dev.username === username && dev.stateId) {
-          await runDockerExec(['ipsec', 'whack', '--deletestate', dev.stateId]);
+          await disconnectIpsecState(dev.stateId);
         }
       }
     } catch(e) {}
 
-    // 1. Revoke IKEv2 client (non-interactive)
-    await runDockerExec(['sh', '-c', 'printf "y\\n" | ikev2.sh --revokeclient "$1" || true', 'omnivpn-revoke', username]);
+    // 1. Revoke the certificate so it cannot connect, then remove its database record and files.
+    await runDockerExec(['ikev2.sh', '--revokeclient', username, '--yes'], { timeout: 60_000 });
+    const deleteIkev2 = await runDockerExec(['ikev2.sh', '--deleteclient', username, '--yes'], { timeout: 60_000 });
+    if (!deleteIkev2.success && !/does not exist|invalid client name/i.test(deleteIkev2.error)) {
+      throw new Error(deleteIkev2.error);
+    }
+    await runDockerExec([
+      'sh', '-c',
+      'rm -f "/etc/ipsec.d/$1.p12" "/etc/ipsec.d/$1.mobileconfig" "/etc/ipsec.d/$1.sswan" "/etc/ipsec.d/$1.enc.p12"',
+      'omnivpn-clean-configs', username
+    ]);
 
     // 2. Remove L2TP credentials
     const removePpp = await runDockerExec([
@@ -699,13 +674,25 @@ app.get('/api/users/:username/download/:type', authMiddleware, async (req, res) 
   if (!username || !/^[a-zA-Z0-9_-]{1,64}$/.test(username)) {
     return res.status(400).json({ error: 'Invalid username.' });
   }
-  if (!['p12', 'mobileconfig', 'sswan', 'windows-zip'].includes(type)) {
+  if (!['p12', 'mobileconfig', 'sswan', 'wireguard', 'windows-zip'].includes(type)) {
     return res.status(400).json({ error: 'Invalid download type.' });
+  }
+
+  if (type === 'wireguard') {
+    const configs = buildClientConnectionConfigs(username);
+    if (!configs || !configs.wgConfig) {
+      return res.status(404).json({ error: 'WireGuard configuration was not found.' });
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${username}.conf"`);
+    return res.send(`${configs.wgConfig}\n`);
   }
 
   const tmpExport = fs.mkdtempSync('/tmp/omnivpn-export-');
   try {
-    await Promise.all(['p12', 'mobileconfig', 'sswan'].map((extension) =>
+    const requiredExtensions = type === 'windows-zip' ? ['p12'] : [type];
+    await Promise.all(requiredExtensions.map((extension) =>
       runFile('docker', ['cp', '-L', `${VPN_CONTAINER}:/etc/ipsec.d/${username}.${extension}`, tmpExport], { timeout: 30_000 })
     ));
 
@@ -724,6 +711,21 @@ app.get('/api/users/:username/download/:type', authMiddleware, async (req, res) 
     if (type === 'sswan') {
       const filePath = `${tmpExport}/${username}.sswan`;
       if (!fs.existsSync(filePath)) throw new Error('File not found');
+      const androidP12 = await runDockerExec([
+        'sh', '-c',
+        'set -e; . /etc/ipsec.d/.vpnconfig; dir="$(mktemp -d /tmp/omnivpn-android-XXXXXX)"; trap \'rm -rf "$dir"\' EXIT; umask 077; openssl pkcs12 -legacy -in "/etc/ipsec.d/$1.p12" -passin "pass:$IKEV2_CONFIG_PASSWORD" -nodes -out "$dir/bundle.pem" >/dev/null 2>&1; openssl pkcs12 -legacy -export -in "$dir/bundle.pem" -out "$dir/android.p12" -passout "pass:$2" -name "$1" >/dev/null 2>&1; base64 "$dir/android.p12" | tr -d "\\n"',
+        'omnivpn-android-export', username, ANDROID_CERTIFICATE_PASSWORD
+      ], { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 });
+      if (!androidP12.success || !androidP12.output) {
+        throw new Error(androidP12.error || 'Android certificate export failed');
+      }
+
+      const profile = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      profile.name = username;
+      profile.local = profile.local || {};
+      profile.local.p12 = androidP12.output;
+      fs.writeFileSync(filePath, `${JSON.stringify(profile, null, 2)}\n`, { mode: 0o600 });
+      res.setHeader('Content-Type', 'application/vnd.strongswan.profile');
       return res.download(filePath, `${username}.sswan`, () => fs.rmSync(tmpExport, { recursive: true, force: true }));
     }
 
@@ -731,60 +733,138 @@ app.get('/api/users/:username/download/:type', authMiddleware, async (req, res) 
       const p12Path = `${tmpExport}/${username}.p12`;
       if (!fs.existsSync(p12Path)) throw new Error('Client certificate not found');
 
-      // Generate Windows 1-Click Batch Script
+      const passwordResult = await runDockerExec(['sh', '-c', '. /etc/ipsec.d/.vpnconfig 2>/dev/null || true; printf %s "$IKEV2_CONFIG_PASSWORD"']);
+      const p12Password = passwordResult.success ? passwordResult.output : '';
+      if (!p12Password) throw new Error('IKEv2 client configuration password is unavailable');
+
+      const psPassword = p12Password.replace(/'/g, "''");
+      const profileName = username;
+
+      // Generate a small elevation wrapper and a validated PowerShell installer.
       const batContent = `@echo off
-:: Windows 1-Click IKEv2 Setup for ${username}
+:: OmniVPN Windows installer for ${username}
 net session >nul 2>&1
 if %errorlevel% neq 0 (
-    echo Requesting Administrator Privileges...
-    powershell -Command "Start-Process cmd -ArgumentList '/c \"\"%~dpnx0\"\"' -Verb RunAs"
+    echo Requesting administrator privileges...
+    powershell.exe -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
     exit /b
 )
 
 cd /d "%~dp0"
-echo ========================================================
-echo   Setting up IKEv2 VPN: My IKEv2 VPN (${username})
-echo ========================================================
-
-echo [1/4] Cleaning up old VPN certificates for ${username}...
-powershell -Command "Get-ChildItem -Path Cert:\\LocalMachine\\My | Where-Object { $_.Subject -match 'CN=${username}' } | Remove-Item -Force -ErrorAction SilentlyContinue"
-
-echo [2/4] Importing ${username}.p12 certificate into Machine Store...
-      certutil -f -importpfx "%~dp0${username}.p12" NoExport
-
-echo [3/4] Configuring Windows IPsec registry parameters...
-REG ADD HKLM\\SYSTEM\\CurrentControlSet\\Services\\RasMan\\Parameters /v NegotiateDH2048_AES256 /t REG_DWORD /d 0x1 /f
-REG ADD HKLM\\SYSTEM\\CurrentControlSet\\Services\\PolicyAgent /v AssumeUDPEncapsulationContextOnSendRule /t REG_DWORD /d 0x2 /f
-
-echo [4/4] Creating Windows IKEv2 VPN profile...
-powershell -Command "Remove-VpnConnection -Name 'My IKEv2 VPN' -Force -ErrorAction SilentlyContinue; Add-VpnConnection -ServerAddress '${SERVER_IP}' -Name 'My IKEv2 VPN' -TunnelType IKEv2 -AuthenticationMethod MachineCertificate -EncryptionLevel Required -PassThru; Set-VpnConnectionIPsecConfiguration -ConnectionName 'My IKEv2 VPN' -AuthenticationTransformConstants GCMAES128 -CipherTransformConstants GCMAES128 -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -PfsGroup None -DHGroup Group14 -PassThru -Force"
-
-echo.
-echo ========================================================
-echo Setup Complete! 
-echo Click the Wi-Fi/Network icon in your taskbar and click Connect on 'My IKEv2 VPN'.
-echo ========================================================
-pause
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0install_windows_ikev2.ps1"
+exit /b %errorlevel%
 `;
       fs.writeFileSync(`${tmpExport}/install_windows_ikev2.bat`, batContent);
+
+      const psContent = `$ErrorActionPreference = 'Stop'
+$profileName = '${profileName}'
+$serverAddress = '${SERVER_IP}'
+$p12Path = Join-Path $PSScriptRoot '${username}.p12'
+$p12Password = '${psPassword}'
+$caName = 'IKEv2 VPN CA'
+
+function Write-Step([string] $Message) {
+  Write-Host "\`n==> $Message" -ForegroundColor Cyan
+}
+
+try {
+  if (-not (Test-Path -LiteralPath $p12Path)) {
+    throw "Certificate file not found: $p12Path"
+  }
+
+  Write-Step 'Removing older OmniVPN profiles and certificates'
+  Get-VpnConnection -ErrorAction SilentlyContinue |
+    Where-Object { $_.ServerAddress -eq $serverAddress -or $_.Name -in @('My IKEv2 VPN', $profileName) } |
+    ForEach-Object { Remove-VpnConnection -Name $_.Name -Force -ErrorAction SilentlyContinue }
+
+  $machineStore = New-Object System.Security.Cryptography.X509Certificates.X509Store('My', 'LocalMachine')
+  $machineStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+  try {
+    @($machineStore.Certificates) |
+      Where-Object { $_.Issuer -like "*CN=$caName*" } |
+      ForEach-Object { $machineStore.Remove($_) }
+  } finally {
+    $machineStore.Close()
+  }
+
+  $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root', 'LocalMachine')
+  $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+  try {
+    @($rootStore.Certificates) |
+      Where-Object { $_.Subject -like "*CN=$caName*" } |
+      ForEach-Object { $rootStore.Remove($_) }
+  } finally {
+    $rootStore.Close()
+  }
+
+  $remainingClients = @(Get-ChildItem Cert:\\LocalMachine\\My |
+    Where-Object { $_.Issuer -like "*CN=$caName*" })
+  $remainingRoots = @(Get-ChildItem Cert:\\LocalMachine\\Root |
+    Where-Object { $_.Subject -like "*CN=$caName*" })
+  if ($remainingClients.Count -ne 0 -or $remainingRoots.Count -ne 0) {
+    throw 'Windows could not remove the previous OmniVPN certificates.'
+  }
+
+  Write-Step 'Importing and validating the client certificate'
+  & certutil.exe -f -p $p12Password -importpfx $p12Path NoExport | Out-Host
+  if ($LASTEXITCODE -ne 0) { throw 'Windows could not import the P12 certificate.' }
+
+  $clientCertificates = @(Get-ChildItem Cert:\\LocalMachine\\My |
+    Where-Object { $_.GetNameInfo('SimpleName', $false) -eq $profileName -and $_.Issuer -like "*CN=$caName*" -and $_.HasPrivateKey })
+  if ($clientCertificates.Count -ne 1) { throw 'Windows did not import exactly one matching client certificate with a private key.' }
+
+  $trustedCa = Get-ChildItem Cert:\\LocalMachine\\Root |
+    Where-Object { $_.Subject -like "*CN=$caName*" } |
+    Select-Object -First 1
+  if (-not $trustedCa) {
+    $certificates = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2Collection
+    $certificates.Import($p12Path, $p12Password, [System.Security.Cryptography.X509Certificates.X509KeyStorageFlags]::DefaultKeySet)
+    $rootCertificate = $certificates | Where-Object { $_.Subject -eq $_.Issuer } | Select-Object -First 1
+    if (-not $rootCertificate) { throw 'The trusted CA certificate was not found in the P12 archive.' }
+    $rootStore = New-Object System.Security.Cryptography.X509Certificates.X509Store('Root', 'LocalMachine')
+    $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    try { $rootStore.Add($rootCertificate) } finally { $rootStore.Close() }
+  }
+
+  $trustedRoots = @(Get-ChildItem Cert:\\LocalMachine\\Root |
+    Where-Object { $_.Subject -like "*CN=$caName*" })
+  if ($trustedRoots.Count -ne 1) { throw 'Windows did not install exactly one trusted OmniVPN root certificate.' }
+
+  Write-Step "Creating VPN profile '$profileName'"
+  New-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\RasMan\\Parameters' -Name 'NegotiateDH2048_AES256' -PropertyType DWord -Value 1 -Force | Out-Null
+  New-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Services\\PolicyAgent' -Name 'AssumeUDPEncapsulationContextOnSendRule' -PropertyType DWord -Value 2 -Force | Out-Null
+  Add-VpnConnection -ServerAddress $serverAddress -Name $profileName -TunnelType IKEv2 -AuthenticationMethod MachineCertificate -EncryptionLevel Required -PassThru | Out-Host
+  Set-VpnConnectionIPsecConfiguration -ConnectionName $profileName -AuthenticationTransformConstants GCMAES128 -CipherTransformConstants GCMAES128 -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -PfsGroup None -DHGroup Group14 -PassThru -Force | Out-Host
+
+  Write-Host "\`nVPN profile '$profileName' installed successfully." -ForegroundColor Green
+  Write-Host 'Restart Windows before connecting so the IPsec changes take effect.' -ForegroundColor Yellow
+  Read-Host 'Press Enter to close'
+  exit 0
+} catch {
+  Write-Host "\`nINSTALLATION FAILED: $($_.Exception.Message)" -ForegroundColor Red
+  Write-Host 'No working VPN profile was created. Correct the error and run the installer again.' -ForegroundColor Yellow
+  Read-Host 'Press Enter to close'
+  exit 1
+}
+`;
+      fs.writeFileSync(`${tmpExport}/install_windows_ikev2.ps1`, psContent);
 
       const readmeContent = `=== IKEv2 VPN Setup Instructions for ${username} ===
 
 Server Address: ${SERVER_IP}
 Client Name:    ${username}
+VPN Profile:    ${profileName}
 
 WINDOWS 10 / 11 SETUP (Easiest):
 1. Extract all files in this ZIP archive to a folder on your Windows PC.
 2. Right-click on "install_windows_ikev2.bat" and choose "Run as administrator".
-3. Click your network tray icon -> Select "My IKEv2 VPN" -> Click Connect!
+3. Confirm that the installer says the VPN profile was installed successfully.
+4. Restart Windows.
+5. Open VPN settings, select "${profileName}", and click Connect.
 
-MANUAL POWERSHELL SETUP:
-1. Open PowerShell as Administrator.
-2. Run:
-   certutil -f -importpfx "${username}.p12" NoExport
-   REG ADD HKLM\\SYSTEM\\CurrentControlSet\\Services\\RasMan\\Parameters /v NegotiateDH2048_AES256 /t REG_DWORD /d 0x1 /f
-   Add-VpnConnection -ServerAddress '${SERVER_IP}' -Name 'My IKEv2 VPN' -TunnelType IKEv2 -AuthenticationMethod MachineCertificate -EncryptionLevel Required -PassThru
-   Set-VpnConnectionIPsecConfiguration -ConnectionName 'My IKEv2 VPN' -AuthenticationTransformConstants GCMAES128 -CipherTransformConstants GCMAES128 -EncryptionMethod AES256 -IntegrityCheckMethod SHA256 -PfsGroup None -DHGroup Group14 -PassThru -Force
+The installer replaces older OmniVPN certificates and profiles for this server so
+Windows selects the correct client certificate. If installation fails, keep the
+error window open and use its exact message for troubleshooting.
 `;
       fs.writeFileSync(`${tmpExport}/README.txt`, readmeContent);
 
@@ -800,6 +880,7 @@ MANUAL POWERSHELL SETUP:
 
       archive.pipe(res);
       archive.file(`${tmpExport}/install_windows_ikev2.bat`, { name: 'install_windows_ikev2.bat' });
+      archive.file(`${tmpExport}/install_windows_ikev2.ps1`, { name: 'install_windows_ikev2.ps1' });
       archive.file(`${tmpExport}/${username}.p12`, { name: `${username}.p12` });
       archive.file(`${tmpExport}/README.txt`, { name: 'README.txt' });
       archive.finalize();

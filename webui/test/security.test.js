@@ -5,13 +5,21 @@ const test = require('node:test');
 
 const securityPath = path.join(__dirname, '..', 'security.js');
 
-test('security module refuses weak administrator credentials', () => {
+test('security module requires an administrator credential', () => {
   const result = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(securityPath)})`], {
-    env: { ...process.env, WEBUI_PASSWORD: 'short' },
+    env: { ...process.env, WEBUI_PASSWORD: '' },
     encoding: 'utf8'
   });
   assert.notEqual(result.status, 0);
-  assert.match(result.stderr, /at least 16 characters/);
+  assert.match(result.stderr, /must be set/);
+});
+
+test('short personal-use passwords are accepted when explicitly configured', () => {
+  const result = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(securityPath)})`], {
+    env: { ...process.env, WEBUI_PASSWORD: 'home' },
+    encoding: 'utf8'
+  });
+  assert.equal(result.status, 0, result.stderr);
 });
 
 test('password comparison accepts only the configured value', () => {

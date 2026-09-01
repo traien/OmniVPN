@@ -8,7 +8,7 @@ Do not open public issues containing vulnerabilities, credentials, server addres
 
 - Terminate TLS before the WebUI and keep its default loopback binding.
 - Use independent random values for every secret in `.env`.
-- Keep `WEBUI_SECURE_COOKIE=true` outside local development.
+- Set `WEBUI_SECURE_COOKIE=true` when the dashboard is served through HTTPS. Leave it `false` for loopback-only HTTP access.
 - Leave DNS logging and GeoIP disabled unless users have been informed and retention is justified.
 - Pin `IPSEC_IMAGE` to an architecture-specific digest in controlled environments.
 - Store `.ovpnbackup` files and `BACKUP_PASSPHRASE` separately.

@@ -70,6 +70,29 @@ services:
       retries: 3
       start_period: 15s
 
+  caddy:
+    image: caddy:2.11.4-alpine
+    container_name: vpn-caddy
+    restart: unless-stopped
+    environment:
+      WEBUI_DOMAIN: ${WEBUI_DOMAIN:-localhost}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - vpn-net
+    depends_on:
+      vpn-webui:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+
   wireguard:
     image: lscr.io/linuxserver/wireguard:1.0.20260223-r0-ls120
     container_name: wireguard
@@ -129,3 +152,5 @@ volumes:
   wireguard-data:
   xray-data:
   vpn-logs:
+  caddy-data:
+  caddy-config:

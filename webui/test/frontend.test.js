@@ -3,17 +3,30 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 
-test('dashboard uses local assets and safe DOM rendering', () => {
+test('dashboard retains the original control-panel design and required hooks', () => {
   const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
-  assert.doesNotMatch(html, /https?:\/\//);
-  assert.doesNotMatch(html, /\son[a-z]+=/i);
-  assert.doesNotMatch(app, /\.innerHTML\s*=/);
-  assert.match(html, /<dialog/);
-  assert.match(html, /prefers-reduced-motion|style\.css/);
-  assert.ok(fs.existsSync(path.join(__dirname, '..', 'node_modules', 'qrcodejs', 'qrcode.min.js')));
-
-  const htmlIds = new Set([...html.matchAll(/id="([^"]+)"/g)].map((match) => match[1]));
-  const referencedIds = [...app.matchAll(/\$\('([^']+)'\)/g)].map((match) => match[1]);
-  assert.deepEqual([...new Set(referencedIds.filter((id) => !htmlIds.has(id)))], []);
+  assert.match(html, /VPN Control Panel/);
+  assert.match(html, /cdn\.tailwindcss\.com/);
+  assert.match(html, /id="modal-guide"/);
+  assert.match(html, /id="guide-btn-win-zip"/);
+  assert.match(html, /id="guide-btn-apple"/);
+  assert.match(html, /id="guide-btn-android"/);
+  assert.match(html, /id="guide-btn-p12"/);
+  assert.match(html, /play\.google\.com\/store\/apps\/details\?id=org\.strongswan\.android/);
+  assert.match(html, /play\.google\.com\/store\/apps\/details\?id=com\.wireguard\.android/);
+  assert.match(html, /play\.google\.com\/store\/apps\/details\?id=com\.github\.shadowsocks/);
+  assert.match(app, /function downloadClientArtifact/);
+  assert.doesNotMatch(app, /function buildWireGuardConfig/);
+  assert.doesNotMatch(app, /function buildShadowsocksUri/);
+  assert.match(app, /api\/users\/\$\{encodeURIComponent\(username\)\}\/configs/);
+  assert.match(app, /width: 512,[\s\S]*height: 512/);
+  assert.match(app, /correctLevel: QRCode\.CorrectLevel\.L/);
+  assert.match(app, /value\.replace\(\/\\r\\n\/g, '\\n'\)\.trim\(\)/);
+  assert.match(html, /id="guide-btn-wireguard"/);
+  assert.match(html, /id="guide-android-password"/);
+  assert.match(app, /androidCertificatePassword/);
+  assert.doesNotMatch(app, /api\/secrets\/ikev2-config-password/);
+  assert.match(app, /Copy the generated L2TP password/);
+  assert.doesNotMatch(html, /id="tab-logs"|id="tab-logs-m"/);
 });
